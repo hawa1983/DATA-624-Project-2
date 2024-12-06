@@ -1,0 +1,851 @@
+---
+title: "DATA 624 Project 2"
+author: "Non Linear Group"
+date: "2024-12-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Load training and test datasets with explicit missing value handling
+train_set <- read.csv("https://raw.githubusercontent.com/hawa1983/DATA-624/refs/heads/main/Project%202/StudentData.csv", na.strings = c("", "NA", "NULL"))
+evaluation_set <- read.csv("https://raw.githubusercontent.com/hawa1983/DATA-624/refs/heads/main/Project%202/StudentEvaluation.csv", na.strings = c("", "NA", "NULL"))
+
+# Verify missing values in Brand.Code
+cat("Number of missing values in Brand.Code (train):", sum(is.na(train_set$Brand.Code)), "\n")
+cat("Number of missing values in Brand.Code (test):", sum(is.na(evaluation_set$Brand.Code)), "\n")
+
+# Check the structure of the dataset to confirm the changes
+str(evaluation_set)
+
+```
+
+## Summarize numerical variables and investigate missing values
+
+### Notable Observations:
+
+1. **Mnf.Flow**: Highly skewed with a wide range (-100.20 to 229.40) and a very high standard deviation (119.48), indicating significant variability.
+2. **Carb.Flow**: Extremely skewed with a wide range (26.00 to 5104.00) and a high standard deviation (1073.70), suggesting potential outliers.
+3. **Filler.Speed**: Large spread (998.00 to 4030.00) with a substantial standard deviation (770.82), indicating significant variability across samples.
+4. **Hyd.Pressure1, Hyd.Pressure2, Hyd.Pressure3**: All exhibit high skewness with notable ranges and standard deviations (e.g., `Hyd.Pressure1`: -0.80 to 58.00, SD = 12.43), likely requiring transformation.
+5. **MFR**: Missing values are notable (8.25%), with a moderately wide range (31.40 to 868.60) and standard deviation (73.90), indicating some variability.
+
+### Recommendations:
+- Apply transformations (e.g., log or Box-Cox) for skewed variables (`Carb.Flow`, `Mnf.Flow`, `Hyd.Pressure*`) to normalize distributions.
+- Investigate outliers for variables with large ranges and high variability (`Carb.Flow`, `Filler.Speed`).
+- Address missingness in `MFR` due to its notable percentage (8.25%).
+
+```{r}
+# Load necessary libraries
+# install.packages('kableExtra', repos='http://cran.rstudio.com/')
+
+library(kableExtra)
+library(dplyr)
+library(tidyr)
+
+
+# Create vectors of numeric and categorical variables for insurance_training
+numeric_vars <- names(train_set)[sapply(train_set, is.numeric)]
+categorical_vars <- names(train_set)[sapply(train_set, is.factor)]
+
+# Correctly select numerical variables using the predefined numeric_vars
+numerical_vars <- train_set %>%
+  dplyr::select(all_of(numeric_vars))
+
+
+# Compute statistical summary including missing value counts and percentages
+statistical_summary <- numerical_vars %>%
+  summarise(across(
+    everything(),
+    list(
+      Min = ~round(min(., na.rm = TRUE), 2),
+      Q1 = ~round(quantile(., 0.25, na.rm = TRUE), 2),
+      Mean = ~round(mean(., na.rm = TRUE), 2),
+      Median = ~round(median(., na.rm = TRUE), 2),
+      Q3 = ~round(quantile(., 0.75, na.rm = TRUE), 2),
+      Max = ~round(max(., na.rm = TRUE), 2),
+      SD = ~round(sd(., na.rm = TRUE), 2),
+      Missing = ~sum(is.na(.)), # Count of missing values
+      PercentMissing = ~round(mean(is.na(.)) * 100, 2) # Percentage of missing values
+    ),
+    .names = "{.col}_{.fn}"
+  )) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = c("Variable", ".value"),
+    names_pattern = "^(.*)_(.*)$"
+  )
+
+# Display the resulting summary table
+statistical_summary %>%
+  kable(caption = "Summary of Numerical Variables (Including Missing Counts and Percentages)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+## Visualize missing values
+1. **High Missingness (e.g., `MFR` ~8%)**: Use **predictive imputation** methods like MICE (Multivariate Imputation by Chained Equations) or KNN to estimate values based on patterns in other variables.
+
+2. **Low to Moderate Missingness (<5%)**:
+   - **Continuous Variables**: Use **mean imputation** for normally distributed data and **median imputation** for skewed data (e.g., `PC.Volume`, `Fill.Ounces`).
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Prepare data for missing values
+missing_data <- train_set %>%
+  summarise(across(everything(), ~sum(is.na(.)))) %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Missing") %>%
+  mutate(PercentMissing = (Missing / nrow(train_set)) * 100) %>%
+  filter(Missing > 0) # Include only variables with missing values
+
+# Create the flipped bar chart
+ggplot(missing_data, aes(x = reorder(Variable, PercentMissing), y = PercentMissing)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Missing Values by Variable",
+    x = "Variable",
+    y = "Percentage of Missing Values (%)"
+  ) +
+  theme_minimal()
+
+```
+
+## Summary of categorical variables
+
+The `Brand.Code` variable has 5 unique levels, no missing values, and a mode of `B` (48.19%). It shows moderate entropy (1.93) and a high imbalance ratio (10.32), indicating a skewed distribution.
+
+
+```{r}
+library(dplyr)
+library(knitr)
+
+# Select categorical columns including Brand.Code
+categorical_columns <- train_set %>%
+  dplyr::select(all_of(c(categorical_vars, "Brand.Code")))
+
+# Function to calculate Shannon entropy
+calculate_entropy <- function(counts) {
+  proportions <- counts / sum(counts)
+  entropy <- -sum(proportions * log2(proportions), na.rm = TRUE)
+  return(entropy)
+}
+
+# Function to calculate imbalance ratio
+calculate_imbalance_ratio <- function(counts) {
+  max_count <- max(counts, na.rm = TRUE)
+  min_count <- min(counts, na.rm = TRUE)
+  if (min_count == 0) {
+    imbalance_ratio <- Inf  # Avoid division by zero
+  } else {
+    imbalance_ratio <- max_count / min_count
+  }
+  return(imbalance_ratio)
+}
+
+# Ensure all levels for each variable are included
+complete_levels <- function(var, data) {
+  unique_levels <- unique(data[[var]])
+  factor(unique_levels, levels = unique_levels)
+}
+
+# Compute the summary for each categorical variable
+categorical_summary <- lapply(names(categorical_columns), function(var) {
+  # Ensure all levels are accounted for, even with 0 counts
+  summary_df <- train_set %>%
+    count(!!sym(var), .drop = FALSE) %>%
+    complete(!!sym(var) := unique(train_set[[var]]), fill = list(n = 0)) %>%
+    mutate(Percentage = round(n / sum(n) * 100, 2)) %>%
+    rename(Level = !!sym(var), Count = n) %>%
+    mutate(Variable = var)  # Add the variable name for identification
+  
+  # Compute the mode for the variable
+  mode_row <- summary_df %>%
+    filter(Count == max(Count, na.rm = TRUE)) %>%
+    slice(1) %>%  # Handle ties by selecting the first mode
+    pull(Level)
+  
+  # Compute percentage for the mode
+  mode_percentage <- summary_df %>%
+    filter(Level == mode_row) %>%
+    pull(Percentage) %>%
+    first()  # Ensure it works even if there are multiple matches
+  
+  # Count missing values for the variable
+  missing_count <- sum(is.na(train_set[[var]]))
+  
+  # Count unique levels
+  unique_levels_count <- n_distinct(train_set[[var]])
+  
+  # Compute entropy
+  entropy <- calculate_entropy(summary_df$Count)
+  
+  # Compute imbalance ratio
+  imbalance_ratio <- calculate_imbalance_ratio(summary_df$Count)
+  
+  # Combine into a single row summary for the variable
+  final_row <- data.frame(
+    Variable = var,
+    Mode = as.character(mode_row),  # Ensure Mode is always a character
+    Mode_Percentage = mode_percentage,
+    Missing_Count = missing_count,
+    Unique_Levels = unique_levels_count,
+    Entropy = round(entropy, 2),
+    Imbalance_Ratio = round(imbalance_ratio, 2),
+    stringsAsFactors = FALSE  # Avoid factors unless explicitly needed
+  )
+  
+  return(final_row)
+})
+
+# Combine summaries into a single data frame
+categorical_summary_df <- bind_rows(categorical_summary)
+
+# Print the resulting summary
+categorical_summary_df %>%
+  kable(caption = "Summary of Numerical Variables (Including Missing Counts and Percentages)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+
+```
+
+
+## Investigate relationship between Brand Code and PH
+
+There is a statistically significant relationship between **Brand_Code** and **PH** based on the provided analyses. We will therefore retain Brand.Code as a variables:
+
+### Summary Statistics
+The mean, median, and standard deviation of **PH** vary across the different levels of **Brand_Code**, indicating differences in central tendency and variability.
+
+### ANOVA
+The ANOVA results show a significant F-statistic with a p-value less than 0.05 (\(p < 2.2 \times 10^{-16}\)), which suggests that there are statistically significant differences in the mean **PH** values across the levels of **Brand_Code**.
+
+### Boxplots
+The boxplots illustrate visible differences in the distributions of **PH** for each **Brand_Code**. These differences reinforce the findings from the summary statistics and ANOVA.
+
+### Chi-Square Test (Categorized PH)
+When **PH** is categorized into levels such as "Low," "Medium," and "High," the Chi-Square test also indicates a significant association (\(p < 2.2 \times 10^{-16}\)). However, the warning about the Chi-Square approximation suggests caution in interpretation, potentially due to sparse data in some categories.
+
+### Conclusion
+The statistical evidence supports a relationship between **Brand_Code** and **PH**. These findings could inform further modeling, such as including **Brand_Code** as a categorical predictor in statistical or machine learning models.
+
+### Step 1: Statistical Summary by Group
+```{r}
+# Summary of PH by Brand_Code
+summary_stats <- aggregate(PH ~ Brand.Code, 
+                           data = train_set, 
+                           FUN = function(x) c(mean = mean(x), 
+                                               median = median(x), 
+                                               sd = sd(x)))
+
+# Convert the result into a more readable data frame
+summary_df <- do.call(data.frame, summary_stats)
+
+# Rename the columns for better understanding
+colnames(summary_df) <- c("Brand_Code", "PH_Mean", "PH_Median", "PH_SD")
+
+# Print the summary
+print(summary_df)
+
+```
+
+### Step 2: Perform ANOVA
+```{r}
+# Perform ANOVA
+anova_result <- aov(PH ~ Brand.Code, data = train_set)
+summary(anova_result)
+```
+
+### Step 3: Create Boxplots
+```{r}
+# Visualize using boxplots
+library(ggplot2)
+ggplot(train_set, aes(x = Brand.Code, y = PH)) +
+  geom_boxplot() +
+  labs(title = "Boxplot of PH by Brand Code", x = "Brand Code", y = "PH") +
+  theme_minimal()
+```
+
+### Step 4: Chi-Square Test (If PH is Categorized)
+```{r}
+# Convert PH to categorical (if needed)
+train_set$PH_cat <- cut(train_set$PH, breaks = 3, labels = c("Low", "Medium", "High"))
+
+# Perform Chi-Square Test
+chisq_test <- chisq.test(table(train_set$Brand.Code, train_set$PH_cat))
+chisq_test
+```
+
+
+## Impute Missing Values
+
+The imputation methods applied in the script are outlined below, incorporating the specialized treatment of the **Brand_Code** variable and handling scenarios where the target variable (`PH`) is unavailable in the evaluation set:
+
+**Imputation Methods Summary**:
+
+1. **Numeric Variables**:
+   - **Predictive Mean Matching (PMM)** was used for numeric variables, implemented via the `mice` package.
+   - Missing values were imputed by predicting plausible values based on observed data patterns, ensuring realistic and consistent imputations across variables.
+
+2. **Categorical Variables (`Brand_Code`)**:
+   - **Brand_Code**:
+     - For the **training set**, missing values in `Brand_Code` were imputed using a **multinomial logistic regression model** with `PH` as the predictor. This method leverages the observed relationship between `Brand_Code` and `PH` to provide accurate and contextually appropriate imputations.
+     - For the **evaluation set** (where `PH` is unavailable), missing values in `Brand_Code` were imputed using **mode-based imputation**. The most frequent category from the training data was assigned to ensure consistency while addressing the absence of a predictor.
+
+3. **Exclusions**:
+   - The variable `PH` was explicitly excluded from imputation in the `evaluation_set` as its values are missing by design, representing the target variable to be predicted.
+   - Any remaining missing values for `PH` were excluded from the final missing values report, as they are not subject to imputation.
+
+
+```{r}
+# Check and install necessary packages
+necessary_packages <- c("mice", "dplyr", "nnet")
+for (pkg in necessary_packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg)
+  }
+}
+
+# Load the required libraries
+library(mice)
+library(dplyr)
+library(nnet)
+
+# Function to impute numeric variables using MICE
+impute_with_mice <- function(data, exclude_vars = NULL) {
+  numeric_data <- data %>% select_if(is.numeric)
+  set.seed(123)  # For reproducibility
+  imputed_data <- mice(numeric_data, m = 1, method = "pmm", maxit = 5, printFlag = FALSE)
+  data[, names(numeric_data)] <- complete(imputed_data)
+  return(data)
+}
+
+# Function to impute Brand.Code using Multinomial Logistic Regression
+impute_brand_code <- function(data, target_col, predictor_col) {
+  # Ensure Brand.Code is a factor
+  data[[target_col]] <- factor(data[[target_col]])
+  
+  # Filter data with non-missing values
+  train_data_non_missing <- data[!is.na(data[[target_col]]), ]
+  
+  # Check if sufficient classes are present
+  if (length(unique(train_data_non_missing[[target_col]])) > 1) {
+    # Train multinomial logistic regression
+    model <- multinom(as.formula(paste(target_col, "~", predictor_col)), data = train_data_non_missing)
+    
+    # Predict missing values
+    missing_indices <- is.na(data[[target_col]])
+    data[[target_col]][missing_indices] <- predict(model, newdata = data[missing_indices, ])
+    
+    # Ensure the factor levels are consistent
+    data[[target_col]] <- factor(data[[target_col]], levels = levels(train_data_non_missing[[target_col]]))
+  } else {
+    # Use the mode class if only one class is present
+    warning("Only one class detected for imputation. Using mode imputation.")
+    mode_class <- names(sort(table(train_data_non_missing[[target_col]]), decreasing = TRUE))[1]
+    data[[target_col]][is.na(data[[target_col]])] <- mode_class
+  }
+  
+  return(data)
+}
+
+# Function to impute Brand.Code for datasets without PH values
+impute_brand_code_no_ph <- function(data, target_col, train_data) {
+  # Ensure Brand.Code is a factor
+  train_data[[target_col]] <- factor(train_data[[target_col]])
+  
+  # Use the mode of Brand.Code from the training data
+  mode_class <- names(sort(table(train_data[[target_col]]), decreasing = TRUE))[1]
+  data[[target_col]][is.na(data[[target_col]])] <- mode_class
+  data[[target_col]] <- factor(data[[target_col]], levels = levels(train_data[[target_col]]))
+  
+  return(data)
+}
+
+# Create copies of train_set and evaluation_set
+train_set_imputed <- train_set
+evaluation_set_imputed <- evaluation_set
+
+# Step 1: Impute numeric variables
+train_set_imputed <- impute_with_mice(train_set_imputed)
+evaluation_set_imputed <- impute_with_mice(evaluation_set_imputed)
+
+# Step 2: Impute Brand.Code
+train_set_imputed <- impute_brand_code(train_set_imputed, target_col = "Brand.Code", predictor_col = "PH")
+
+# Use mode-based imputation for the evaluation set as it lacks PH values
+evaluation_set_imputed <- impute_brand_code_no_ph(evaluation_set_imputed, target_col = "Brand.Code", train_data = train_set_imputed)
+
+# Step 3: Check for any remaining missing values
+check_missing <- function(data) {
+  missing_summary <- colSums(is.na(data))
+  missing_summary <- missing_summary[missing_summary > 0]
+  return(missing_summary)
+}
+
+# Check missing values
+cat("Missing values in train_set_imputed:\n")
+print(check_missing(train_set_imputed))
+
+cat("\nMissing values in evaluation_set_imputed:\n")
+print(check_missing(evaluation_set_imputed))
+
+# Structure of imputed datasets
+cat("\nStructure of Train Set Imputed:\n")
+str(train_set_imputed)
+
+cat("\nStructure of Evaluation Set Imputed:\n")
+str(evaluation_set_imputed)
+
+
+```
+
+
+## Visualize Imputed dataset
+
+### **Data Distribution and Characteristics**
+
+The imputed train dataset was analyzed to understand the distributions, skewness, and presence of outliers among its numeric variables. The goal was to identify patterns in the data, such as normality, skewed distributions, and extreme values, while also determining variables with near-zero variance that provide limited analytical value. Below is a summary of the findings:
+
+### **Distribution**
+- **Approximately Normal**: Variables such as "Carb.Volume," "Fill.Ounces," and "PSC" exhibit a roughly symmetric distribution, indicating a normal-like pattern.
+- **Skewed**: Variables like "Carb.Flow," "Hyd.Pressure3," "Density," and "Balling" display significant asymmetry, indicating skewness in the data.
+- **Multimodal**: Variables such as "MFR" and "Filler.Speed" exhibit multiple peaks, suggesting the presence of distinct subgroups or clusters in the data.
+
+### **Skewness**
+- **Right-Skewed**: Variables like "Carb.Flow," "Hyd.Pressure3," "MFR," and "Usage.cont" have a longer tail on the right side, indicating higher values are less frequent.
+- **Left-Skewed**: Variables such as "PSC.CO2," "Carb.Rel," and "PH" have a longer tail on the left side, with lower values being less frequent.
+
+### **Outliers**
+- **Significant Outliers**: Variables including "MFR," "Filler.Speed," "Oxygen.Filler," and "Bowl.Setpoint" have extreme values that deviate from the bulk of the data. These may require further investigation or transformation.
+
+### **Excluded Variables (Near-Zero Variance)**
+- Variables like "Carb.Temp" and "Hyd.Pressure1" have extremely low variance, indicating almost no variability across their observations. These were excluded from visualization as they provide limited information for analysis.
+
+
+```{r}
+# Install and load required libraries
+if (!requireNamespace("caret", quietly = TRUE)) {
+  install.packages("caret")
+}
+
+library(caret)
+library(dplyr)
+library(tidyr)
+
+# Reshape the imputed train_set to long format for numeric columns
+numeric_cols <- sapply(train_set_imputed, is.numeric)
+train_set_long <- pivot_longer(train_set_imputed,
+                               cols = all_of(names(train_set_imputed)[numeric_cols]),
+                               names_to = "variable",
+                               values_to = "value")
+
+# Identify variables with near-zero variance using caret::nearZeroVar
+nzv_indices <- nearZeroVar(train_set_imputed, saveMetrics = TRUE)
+
+# Extract variables with near-zero variance
+nzv_vars <- rownames(nzv_indices[nzv_indices$nzv == TRUE, ])
+
+# Output the list of variables with near-zero variance
+cat("Variables with near-zero variance (not plotted):\n")
+print(nzv_vars)
+
+# Filter out variables with near-zero variance from the long-format data
+train_set_long_filtered <- train_set_long %>%
+  filter(!variable %in% nzv_vars)
+
+# Clip extreme values to the 1st and 99th percentiles for better visualization
+train_set_long_filtered <- train_set_long_filtered %>%
+  group_by(variable) %>%
+  mutate(value = pmin(pmax(value, quantile(value, 0.01, na.rm = TRUE)), 
+                      quantile(value, 0.99, na.rm = TRUE))) %>%
+  ungroup()
+
+# Prepare the list of numeric variables for separate plotting
+numeric_variables <- unique(train_set_long_filtered$variable)
+
+# Set up the plotting area for histograms and boxplots
+par(mfrow = c(1, 2))  # 2 columns for histogram and boxplot side-by-side
+
+# Loop through each numeric variable to plot
+for (var in numeric_variables) {
+  # Filter data for the current variable
+  var_data <- train_set_long_filtered %>% filter(variable == var) %>% pull(value)
+  
+  # Plot histogram
+  hist(var_data, main = paste("Histogram of", var), 
+       xlab = var, breaks = 30, col = "lightblue", border = "black")
+  
+  # Plot boxplot
+  boxplot(var_data, main = paste("Boxplot of", var), 
+          horizontal = TRUE, col = "lightgreen")
+}
+
+
+
+# Reset plotting layout to default
+par(mfrow = c(1, 1))
+
+```
+
+
+
+## **Box-Cox Transformation: Preparation and Application**
+
+To enhance the quality and suitability of the dataset for statistical and machine learning models, specific preprocessing steps were undertaken. These steps ensure the data meets the requirements for transformations and improves its statistical properties:
+
+- **Adjust for Positive Values**:
+  - The Box-Cox transformation requires all input values to be strictly positive. Adjusting non-positive values ensures the transformation can be applied without errors while preserving the integrity of the data.
+
+- **Box-Cox Transformation**:
+  - The transformation stabilizes variance and makes the data distribution closer to normal, which is a common assumption for many statistical models. By identifying the optimal lambda for each numeric column, the data was transformed to enhance its suitability for downstream analysis, thereby improving the reliability and performance of statistical and machine learning models.
+
+```{r}
+# Load necessary libraries
+if (!requireNamespace("MASS", quietly = TRUE)) {
+  install.packages("MASS")
+}
+if (!requireNamespace("dplyr", quietly = TRUE)) {
+  install.packages("dplyr")
+}
+
+library(MASS)   # For Box-Cox transformation
+library(dplyr)  # For data manipulation
+
+# Specify columns to exclude (now including PH)
+exclude_cols <- c("Brand.Code", "PH")
+
+# Create copies of the imputed datasets for Box-Cox transformations
+train_set_boxcox <- train_set_imputed
+evaluation_set_boxcox <- evaluation_set_imputed
+
+# Identify numeric columns to process in the train set
+numeric_cols_train <- setdiff(names(train_set_imputed)[sapply(train_set_imputed, is.numeric)], exclude_cols)
+
+# Process each numeric column in the train set
+for (col in numeric_cols_train) {
+  tryCatch({
+    # Ensure 'col' is a valid column name
+    if (!col %in% names(train_set_imputed)) {
+      stop(paste("Column", col, "not found in train_set_imputed"))
+    }
+    
+    # Extract the column as a vector
+    column_data <- train_set_imputed[[col]]
+    
+    # Check for non-positive values and adjust
+    adjustment <- 0  # Default adjustment to zero
+    if (min(column_data, na.rm = TRUE) <= 0) {
+      adjustment <- abs(min(column_data, na.rm = TRUE)) + 0.001
+      column_data <- column_data + adjustment
+    }
+    
+    # Fit a simple linear model using the extracted vector
+    model <- lm(column_data ~ 1)
+    
+    # Perform Box-Cox transformation without plotting
+    bc <- boxcox(model, lambda = seq(-2, 2, by = 0.1), plotit = FALSE)
+    
+    # Find the lambda that maximizes the log-likelihood
+    optimal_lambda <- bc$x[which.max(bc$y)]
+    
+    # Apply the Box-Cox transformation
+    if (!is.na(optimal_lambda)) {
+      if (optimal_lambda == 0) {
+        train_set_boxcox[[col]] <- log(train_set_imputed[[col]] + adjustment)
+      } else {
+        train_set_boxcox[[col]] <- ((train_set_imputed[[col]] + adjustment)^optimal_lambda - 1) / optimal_lambda
+      }
+    }
+  }, error = function(e) {
+    cat(paste("Error processing column", col, ":", e$message, "in train_set_imputed\n"))
+  })
+}
+
+# Identify numeric columns to process in the evaluation set
+numeric_cols_test <- setdiff(names(evaluation_set_imputed)[sapply(evaluation_set_imputed, is.numeric)], exclude_cols)
+
+# Process each numeric column in the evaluation set
+for (col in numeric_cols_test) {
+  tryCatch({
+    # Ensure 'col' is a valid column name
+    if (!col %in% names(evaluation_set_imputed)) {
+      stop(paste("Column", col, "not found in evaluation_set_imputed"))
+    }
+    
+    # Extract the column as a vector
+    column_data <- evaluation_set_imputed[[col]]
+    
+    # Check for non-positive values and adjust
+    adjustment <- 0  # Default adjustment to zero
+    if (min(column_data, na.rm = TRUE) <= 0) {
+      adjustment <- abs(min(column_data, na.rm = TRUE)) + 0.001
+      column_data <- column_data + adjustment
+    }
+    
+    # Fit a simple linear model using the extracted vector
+    model <- lm(column_data ~ 1)
+    
+    # Perform Box-Cox transformation without plotting
+    bc <- boxcox(model, lambda = seq(-2, 2, by = 0.1), plotit = FALSE)
+    
+    # Find the lambda that maximizes the log-likelihood
+    optimal_lambda <- bc$x[which.max(bc$y)]
+    
+    # Apply the Box-Cox transformation
+    if (!is.na(optimal_lambda)) {
+      if (optimal_lambda == 0) {
+        evaluation_set_boxcox[[col]] <- log(evaluation_set_imputed[[col]] + adjustment)
+      } else {
+        evaluation_set_boxcox[[col]] <- ((evaluation_set_imputed[[col]] + adjustment)^optimal_lambda - 1) / optimal_lambda
+      }
+    }
+  }, error = function(e) {
+    cat(paste("Error processing column", col, ":", e$message, " in evaluation_set_imputed\n"))
+  })
+}
+
+# Output the structure of transformed train and test sets
+cat("\n\nStructure of Transformed Train Set (Box-Cox Applied):\n\n")
+str(train_set_boxcox)
+
+cat("\n\nStructure of Transformed Evaluation Set (Box-Cox Applied):\n\n")
+str(evaluation_set_boxcox)
+
+```
+
+## Skewness Comparison: Impact of Box-Cox Transformation
+
+- **Overview**:  
+  - The visualization compares the skewness of numeric variables before and after applying the Box-Cox transformation, demonstrating its effect on data symmetry.
+
+- **Key Observations**:  
+  - **Significant Skewness Reduction**: Variables such as `Hyd.Pressure2`, `Filler.Speed`, and `Carb.Volume` exhibit a substantial decrease in skewness, transitioning to more symmetric distributions conducive to modeling.  
+  - **Negligible Changes**: Variables like `Temperature` and `PH`, which already had low skewness, experienced minimal or no transformation effects, reflecting their approximate normality.  
+
+- **Conclusion**:  
+  - The Box-Cox transformation is particularly effective for variables with high initial skewness, improving their distribution symmetry. This transformation optimizes the data for statistical analysis and machine learning models that assume normally distributed inputs.
+  
+```{r}
+# Load necessary library
+if (!requireNamespace("e1071", quietly = TRUE)) {
+  install.packages("e1071")
+}
+library(e1071)  # For calculating skewness
+
+# Select numeric columns in the train_set_imputed and train_set_boxcox
+numeric_cols <- names(train_set_imputed)[sapply(train_set_imputed, is.numeric)]
+
+# Calculate skewness for train_set_imputed
+skewness_imputed <- sapply(train_set_imputed[numeric_cols], skewness, na.rm = TRUE)
+
+# Calculate skewness for train_set_boxcox
+skewness_boxcox <- sapply(train_set_boxcox[numeric_cols], skewness, na.rm = TRUE)
+
+# Combine the skewness results into a data frame for comparison
+skewness_comparison <- data.frame(
+  Variable = numeric_cols,
+  Skewness_Before = skewness_imputed,
+  Skewness_After = skewness_boxcox
+)
+
+# Reshape the data for plotting
+library(reshape2)
+skewness_long <- melt(skewness_comparison, id.vars = "Variable", 
+                      variable.name = "Skewness_Type", value.name = "Skewness")
+
+# Plot the skewness comparison
+library(ggplot2)
+ggplot(skewness_long, aes(x = Variable, y = Skewness, fill = Skewness_Type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +
+  labs(
+    title = "Skewness Comparison: Before and After Box-Cox Transformation",
+    x = "Variable",
+    y = "Skewness"
+  ) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 8), legend.position = "top")
+
+```
+
+## Remove Near-zero Variance Highly Correlated Variables for Model Suitability
+
+In the dataset, several near-zero variance and highly correlated variables were identified and removed, including `Balling`, `Alch.Rel`, `Balling.Lvl`, `Density`, and others. Removing these variables is crucial for models that are sensitive to multicollinearity or feature redundancy, such as:
+
+- **Linear Regression**: To prevent inflated variance estimates and ensure stable coefficients.
+- **Logistic Regression**: To enhance interpretability and maintain prediction accuracy.
+- **PCA (Principal Component Analysis)**: To avoid redundant variables dominating principal components.
+- **Regularized Models (e.g., Lasso, Ridge)**: While these models address multicollinearity, removing redundant variables improves computational efficiency.
+
+For **tree-based models** or **non-linear algorithms** (e.g., Random Forest, XGBoost), this step is generally unnecessary, as these models are robust to multicollinearity and handle feature interactions inherently. 
+
+
+```{r}
+# Load necessary libraries
+if (!requireNamespace("caret", quietly = TRUE)) {
+  install.packages("caret")
+}
+if (!requireNamespace("corrplot", quietly = TRUE)) {
+  install.packages("corrplot")
+}
+
+library(caret)
+library(corrplot)
+
+# Retain a copy of the full dataset for re-adding non-numeric variables
+full_data <- train_set_boxcox
+
+# Select only numeric variables from train_set_boxcox
+numeric_data <- train_set_boxcox[, sapply(train_set_boxcox, is.numeric)]
+
+# Step 1: Identify and remove near-zero variance variables
+nzv <- nearZeroVar(numeric_data, saveMetrics = TRUE)
+
+# Filter the near-zero variance variables
+nzv_vars <- rownames(nzv[nzv$nzv, ])  # Names of variables with near-zero variance
+cat("Near-zero variance variables removed:\n")
+print(nzv_vars)
+
+# Remove near-zero variance variables
+filtered_data_nzv <- numeric_data[, !(colnames(numeric_data) %in% nzv_vars)]
+
+# Step 2: Compute the correlation matrix (before removing highly correlated variables)
+correlations_before <- cor(filtered_data_nzv, use = "complete.obs")
+
+# Identify highly correlated variables (absolute correlation > 0.75)
+highCorr <- findCorrelation(correlations_before, cutoff = 0.75)
+
+# Get the names of highly correlated variables
+high_corr_vars <- colnames(filtered_data_nzv)[highCorr]
+
+# Create a data frame of highly correlated variables with their correlations
+high_corr_pairs <- subset(as.data.frame(as.table(correlations_before)), abs(Freq) > 0.75 & Var1 != Var2)
+
+# Print the number and names of highly correlated variables
+cat("\nNumber of highly correlated variables:", length(high_corr_vars), "\n")
+cat("Highly correlated variables removed:\n")
+print(high_corr_vars)
+
+# Remove highly correlated variables
+filtered_data_final <- filtered_data_nzv[, -highCorr]
+
+# Step 3: Add back `Brand.Code` and any other non-numeric variables
+non_numeric_vars <- setdiff(names(full_data), names(numeric_data))
+filtered_data_final <- cbind(filtered_data_final, full_data[non_numeric_vars])
+
+# Step 4: Compute the correlation matrix after removing highly correlated variables
+correlations_after <- cor(filtered_data_final[, sapply(filtered_data_final, is.numeric)], use = "complete.obs")
+
+# Step 5: Plot the correlation matrices (before and after)
+par(mfrow = c(1, 2))  # Set up side-by-side plots
+
+# Plot before removing highly correlated variables
+corrplot(correlations_before, order = "hclust", tl.cex = 0.8, addrect = 2)
+mtext("Before Removing\nHighly Correlated Variables", side = 3, line = 1, adj = 0.5, cex = 1.2)
+
+# Plot after removing highly correlated variables
+corrplot(correlations_after, order = "hclust", tl.cex = 0.8, addrect = 2)
+mtext("After Removing\nHighly Correlated Variables", side = 3, line = 1, adj = 0.5, cex = 1.2)
+
+# Reset plotting area
+par(mfrow = c(1, 1))
+
+# Step 6: Sort the data frame in descending order of the Freq column
+sorted_correlation_df <- high_corr_pairs[order(-high_corr_pairs$Freq), ]
+
+# Display the sorted data frame
+print(sorted_correlation_df)
+
+# Step 7: Check structure of the final dataset
+cat("\n\nStructure of Final Dataset:\n")
+str(filtered_data_final)
+
+```
+
+
+## Prepare Datasets for Models
+
+Below is the updated R code to prepare datasets for **gradient-based models**, **tree-based models**, and **statistical models**, reflecting the processing steps and appropriate handling of categorical variables like `Brand_Code`:
+
+### 1. Gradient-Based Models (e.g., Neural Networks, SVM, KNN)
+
+For gradient-based models:
+- **Min-max scaling** is applied to all numeric variables, including the target variable `PH`.
+- **One-hot encoding** is applied to `Brand_Code` without dropping any dummy variables.
+
+```{r}
+# Load required libraries
+if (!requireNamespace("caret", quietly = TRUE)) {
+  install.packages("caret")
+}
+if (!requireNamespace("fastDummies", quietly = TRUE)) {
+  install.packages("fastDummies")
+}
+
+library(caret)
+library(fastDummies)
+
+# Min-Max Scaling
+gradient_based_data <- filtered_data_final
+
+# Apply Min-Max scaling to all numeric variables
+numeric_cols <- names(gradient_based_data)[sapply(gradient_based_data, is.numeric)]
+min_max_scaler <- preProcess(gradient_based_data[, numeric_cols], method = "range")
+gradient_based_data[, numeric_cols] <- predict(min_max_scaler, gradient_based_data[, numeric_cols])
+
+# One-Hot Encoding without dropping any dummy
+gradient_based_data <- dummy_cols(gradient_based_data, 
+                                   select_columns = "Brand.Code", 
+                                   remove_first_dummy = FALSE, # Keep all dummy variables
+                                   remove_selected_columns = TRUE) # Drop the original categorical variable
+
+# Check structure of the final dataset
+str(gradient_based_data)
+```
+
+### 2. Tree-Based Models (e.g., Random Forest, XGBoost, MARS)
+
+For tree-based models:
+- The dataset is used as is, without scaling numeric variables or transforming the target variable `PH`.
+- **Label encoding** is applied to the `Brand_Code` variable instead of one-hot encoding.
+
+```{r}
+# Label Encoding for Tree-Based Models
+tree_based_data <- train_set_boxcox
+
+# Convert Brand_Code to numeric labels
+tree_based_data$Brand_Code <- as.numeric(factor(tree_based_data$Brand.Code))
+
+# Check structure of the final dataset
+str(tree_based_data)
+```
+
+### 3. Statistical Models (e.g., Linear Regression, Logistic Regression, PCA)
+
+For statistical models:
+- **Standardization** (mean centering and scaling to unit variance) is applied to all numeric variables, including the target variable `PH`.
+- **One-hot encoding** is applied to `Brand_Code`, with one dummy variable dropped to avoid multicollinearity.
+
+```{r}
+# Standardization
+statistical_models_data <- filtered_data_final
+
+# Apply Standardization to all numeric variables
+numeric_cols <- names(statistical_models_data)[sapply(statistical_models_data, is.numeric)]
+standard_scaler <- preProcess(statistical_models_data[, numeric_cols], method = c("center", "scale"))
+statistical_models_data[, numeric_cols] <- predict(standard_scaler, statistical_models_data[, numeric_cols])
+
+# One-Hot Encoding with one dummy dropped
+statistical_models_data <- dummy_cols(statistical_models_data, 
+                                      select_columns = "Brand.Code", 
+                                      remove_first_dummy = TRUE,  # Drop one dummy
+                                      remove_selected_columns = TRUE) # Drop the original categorical variable
+
+# Check structure of the final dataset
+str(statistical_models_data)
+```
