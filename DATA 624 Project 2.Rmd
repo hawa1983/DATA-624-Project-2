@@ -1,0 +1,1884 @@
+---
+title: "DATA 624 Project 2"
+author: "Non Linear Group"
+date: "2024-12-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Load training and test datasets with explicit missing value handling
+train_set <- read.csv("https://raw.githubusercontent.com/hawa1983/DATA-624/refs/heads/main/Project%202/StudentData.csv", na.strings = c("", "NA", "NULL"))
+evaluation_set <- read.csv("https://raw.githubusercontent.com/hawa1983/DATA-624/refs/heads/main/Project%202/StudentEvaluation.csv", na.strings = c("", "NA", "NULL"))
+
+# Verify missing values in Brand.Code
+cat("Number of missing values in Brand.Code (train):", sum(is.na(train_set$Brand.Code)), "\n")
+cat("Number of missing values in Brand.Code (test):", sum(is.na(evaluation_set$Brand.Code)), "\n")
+
+# Check the structure of the dataset to confirm the changes
+str(evaluation_set)
+
+```
+
+## Summarize numerical variables and investigate missing values
+
+### Notable Observations:
+
+1. **Mnf.Flow**: Highly skewed with a wide range (-100.20 to 229.40) and a very high standard deviation (119.48), indicating significant variability.
+2. **Carb.Flow**: Extremely skewed with a wide range (26.00 to 5104.00) and a high standard deviation (1073.70), suggesting potential outliers.
+3. **Filler.Speed**: Large spread (998.00 to 4030.00) with a substantial standard deviation (770.82), indicating significant variability across samples.
+4. **Hyd.Pressure1, Hyd.Pressure2, Hyd.Pressure3**: All exhibit high skewness with notable ranges and standard deviations (e.g., `Hyd.Pressure1`: -0.80 to 58.00, SD = 12.43), likely requiring transformation.
+5. **MFR**: Missing values are notable (8.25%), with a moderately wide range (31.40 to 868.60) and standard deviation (73.90), indicating some variability.
+
+### Recommendations:
+- Apply transformations (e.g., log or Box-Cox) for skewed variables (`Carb.Flow`, `Mnf.Flow`, `Hyd.Pressure*`) to normalize distributions.
+- Investigate outliers for variables with large ranges and high variability (`Carb.Flow`, `Filler.Speed`).
+- Address missingness in `MFR` due to its notable percentage (8.25%).
+
+```{r}
+# Load necessary libraries
+# install.packages('kableExtra', repos='http://cran.rstudio.com/')
+
+library(kableExtra)
+library(dplyr)
+library(tidyr)
+
+
+# Create vectors of numeric and categorical variables for insurance_training
+numeric_vars <- names(train_set)[sapply(train_set, is.numeric)]
+categorical_vars <- names(train_set)[sapply(train_set, is.factor)]
+
+# Correctly select numerical variables using the predefined numeric_vars
+numerical_vars <- train_set %>%
+  dplyr::select(all_of(numeric_vars))
+
+
+# Compute statistical summary including missing value counts and percentages
+statistical_summary <- numerical_vars %>%
+  summarise(across(
+    everything(),
+    list(
+      Min = ~round(min(., na.rm = TRUE), 2),
+      Q1 = ~round(quantile(., 0.25, na.rm = TRUE), 2),
+      Mean = ~round(mean(., na.rm = TRUE), 2),
+      Median = ~round(median(., na.rm = TRUE), 2),
+      Q3 = ~round(quantile(., 0.75, na.rm = TRUE), 2),
+      Max = ~round(max(., na.rm = TRUE), 2),
+      SD = ~round(sd(., na.rm = TRUE), 2),
+      Missing = ~sum(is.na(.)), # Count of missing values
+      PercentMissing = ~round(mean(is.na(.)) * 100, 2) # Percentage of missing values
+    ),
+    .names = "{.col}_{.fn}"
+  )) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = c("Variable", ".value"),
+    names_pattern = "^(.*)_(.*)$"
+  )
+
+# Display the resulting summary table
+statistical_summary %>%
+  kable(caption = "Summary of Numerical Variables (Including Missing Counts and Percentages)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+## Visualize missing values
+1. **High Missingness (e.g., `MFR` ~8%)**: Use **predictive imputation** methods like MICE (Multivariate Imputation by Chained Equations) or KNN to estimate values based on patterns in other variables.
+
+2. **Low to Moderate Missingness (<5%)**:
+   - **Continuous Variables**: Use **mean imputation** for normally distributed data and **median imputation** for skewed data (e.g., `PC.Volume`, `Fill.Ounces`).
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Prepare data for missing values
+missing_data <- train_set %>%
+  summarise(across(everything(), ~sum(is.na(.)))) %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Missing") %>%
+  mutate(PercentMissing = (Missing / nrow(train_set)) * 100) %>%
+  filter(Missing > 0) # Include only variables with missing values
+
+# Create the flipped bar chart
+ggplot(missing_data, aes(x = reorder(Variable, PercentMissing), y = PercentMissing)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Missing Values by Variable",
+    x = "Variable",
+    y = "Percentage of Missing Values (%)"
+  ) +
+  theme_minimal()
+
+```
+
+## Summary of categorical variables
+
+The `Brand.Code` variable has 5 unique levels, no missing values, and a mode of `B` (48.19%). It shows moderate entropy (1.93) and a high imbalance ratio (10.32), indicating a skewed distribution.
+
+
+```{r}
+library(dplyr)
+library(knitr)
+
+# Select categorical columns including Brand.Code
+categorical_columns <- train_set %>%
+  dplyr::select(all_of(c(categorical_vars, "Brand.Code")))
+
+# Function to calculate Shannon entropy
+calculate_entropy <- function(counts) {
+  proportions <- counts / sum(counts)
+  entropy <- -sum(proportions * log2(proportions), na.rm = TRUE)
+  return(entropy)
+}
+
+# Function to calculate imbalance ratio
+calculate_imbalance_ratio <- function(counts) {
+  max_count <- max(counts, na.rm = TRUE)
+  min_count <- min(counts, na.rm = TRUE)
+  if (min_count == 0) {
+    imbalance_ratio <- Inf  # Avoid division by zero
+  } else {
+    imbalance_ratio <- max_count / min_count
+  }
+  return(imbalance_ratio)
+}
+
+# Ensure all levels for each variable are included
+complete_levels <- function(var, data) {
+  unique_levels <- unique(data[[var]])
+  factor(unique_levels, levels = unique_levels)
+}
+
+# Compute the summary for each categorical variable
+categorical_summary <- lapply(names(categorical_columns), function(var) {
+  # Ensure all levels are accounted for, even with 0 counts
+  summary_df <- train_set %>%
+    count(!!sym(var), .drop = FALSE) %>%
+    complete(!!sym(var) := unique(train_set[[var]]), fill = list(n = 0)) %>%
+    mutate(Percentage = round(n / sum(n) * 100, 2)) %>%
+    rename(Level = !!sym(var), Count = n) %>%
+    mutate(Variable = var)  # Add the variable name for identification
+  
+  # Compute the mode for the variable
+  mode_row <- summary_df %>%
+    filter(Count == max(Count, na.rm = TRUE)) %>%
+    slice(1) %>%  # Handle ties by selecting the first mode
+    pull(Level)
+  
+  # Compute percentage for the mode
+  mode_percentage <- summary_df %>%
+    filter(Level == mode_row) %>%
+    pull(Percentage) %>%
+    first()  # Ensure it works even if there are multiple matches
+  
+  # Count missing values for the variable
+  missing_count <- sum(is.na(train_set[[var]]))
+  
+  # Count unique levels
+  unique_levels_count <- n_distinct(train_set[[var]])
+  
+  # Compute entropy
+  entropy <- calculate_entropy(summary_df$Count)
+  
+  # Compute imbalance ratio
+  imbalance_ratio <- calculate_imbalance_ratio(summary_df$Count)
+  
+  # Combine into a single row summary for the variable
+  final_row <- data.frame(
+    Variable = var,
+    Mode = as.character(mode_row),  # Ensure Mode is always a character
+    Mode_Percentage = mode_percentage,
+    Missing_Count = missing_count,
+    Unique_Levels = unique_levels_count,
+    Entropy = round(entropy, 2),
+    Imbalance_Ratio = round(imbalance_ratio, 2),
+    stringsAsFactors = FALSE  # Avoid factors unless explicitly needed
+  )
+  
+  return(final_row)
+})
+
+# Combine summaries into a single data frame
+categorical_summary_df <- bind_rows(categorical_summary)
+
+# Print the resulting summary
+categorical_summary_df %>%
+  kable(caption = "Summary of Numerical Variables (Including Missing Counts and Percentages)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+
+```
+
+
+## Investigate relationship between Brand Code and PH
+
+There is a statistically significant relationship between **Brand_Code** and **PH** based on the provided analyses. We will therefore retain Brand.Code as a variables:
+
+### Summary Statistics
+The mean, median, and standard deviation of **PH** vary across the different levels of **Brand_Code**, indicating differences in central tendency and variability.
+
+### ANOVA
+The ANOVA results show a significant F-statistic with a p-value less than 0.05 (\(p < 2.2 \times 10^{-16}\)), which suggests that there are statistically significant differences in the mean **PH** values across the levels of **Brand_Code**.
+
+### Boxplots
+The boxplots illustrate visible differences in the distributions of **PH** for each **Brand_Code**. These differences reinforce the findings from the summary statistics and ANOVA.
+
+### Chi-Square Test (Categorized PH)
+When **PH** is categorized into levels such as "Low," "Medium," and "High," the Chi-Square test also indicates a significant association (\(p < 2.2 \times 10^{-16}\)). However, the warning about the Chi-Square approximation suggests caution in interpretation, potentially due to sparse data in some categories.
+
+### Conclusion
+The statistical evidence supports a relationship between **Brand_Code** and **PH**. These findings could inform further modeling, such as including **Brand_Code** as a categorical predictor in statistical or machine learning models.
+
+### Step 1: Statistical Summary by Group
+```{r}
+# Summary of PH by Brand_Code
+summary_stats <- aggregate(PH ~ Brand.Code, 
+                           data = train_set, 
+                           FUN = function(x) c(mean = mean(x), 
+                                               median = median(x), 
+                                               sd = sd(x)))
+
+# Convert the result into a more readable data frame
+summary_df <- do.call(data.frame, summary_stats)
+
+# Rename the columns for better understanding
+colnames(summary_df) <- c("Brand_Code", "PH_Mean", "PH_Median", "PH_SD")
+
+# Print the summary
+print(summary_df)
+
+```
+
+### Step 2: Perform ANOVA
+```{r}
+# Perform ANOVA
+anova_result <- aov(PH ~ Brand.Code, data = train_set)
+summary(anova_result)
+```
+
+### Step 3: Create Boxplots
+```{r}
+# Visualize using boxplots
+library(ggplot2)
+ggplot(train_set, aes(x = Brand.Code, y = PH)) +
+  geom_boxplot() +
+  labs(title = "Boxplot of PH by Brand Code", x = "Brand Code", y = "PH") +
+  theme_minimal()
+```
+
+### Step 4: Chi-Square Test (If PH is Categorized)
+```{r}
+# Convert PH to categorical (if needed)
+train_set$PH_cat <- cut(train_set$PH, breaks = 3, labels = c("Low", "Medium", "High"))
+
+# Function to calculate mode
+get_mode <- function(x) {
+  ux <- na.omit(unique(x))
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+# Impute missing values in PH_cat with the mode
+mode_PH_cat <- get_mode(train_set$PH_cat)
+train_set$PH_cat[is.na(train_set$PH_cat)] <- mode_PH_cat
+
+
+# Perform Chi-Square Test between Brand.Code and PH_cat
+chisq_test <- chisq.test(table(train_set$Brand.Code, train_set$PH_cat))
+print(chisq_test)
+
+```
+
+
+## Impute Missing Values
+
+The imputation methods applied in the script are outlined below, incorporating the specialized treatment of the **Brand_Code** variable and handling scenarios where the target variable (`PH`) is unavailable in the evaluation set:
+
+**Imputation Methods Summary**:
+
+1. **Numeric Variables**:
+   - **Predictive Mean Matching (PMM)** was used for numeric variables, implemented via the `mice` package.
+   - Missing values were imputed by predicting plausible values based on observed data patterns, ensuring realistic and consistent imputations across variables.
+
+2. **Categorical Variables (`Brand_Code`)**:
+   - **Brand_Code**:
+     - For the **training set**, missing values in `Brand_Code` were imputed using a **multinomial logistic regression model** with `PH` as the predictor. This method leverages the observed relationship between `Brand_Code` and `PH` to provide accurate and contextually appropriate imputations.
+     - For the **evaluation set** (where `PH` is unavailable), missing values in `Brand_Code` were imputed using **mode-based imputation**. The most frequent category from the training data was assigned to ensure consistency while addressing the absence of a predictor.
+
+3. **Exclusions**:
+   - The variable `PH` was explicitly excluded from imputation in the `evaluation_set` as its values are missing by design, representing the target variable to be predicted.
+   - Any remaining missing values for `PH` were excluded from the final missing values report, as they are not subject to imputation.
+
+
+```{r}
+# Check and install necessary packages
+necessary_packages <- c("mice", "dplyr", "nnet")
+for (pkg in necessary_packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg)
+  }
+}
+
+# Load the required libraries
+library(mice)
+library(dplyr)
+library(nnet)
+
+# Function to impute numeric variables using MICE
+impute_with_mice <- function(data, exclude_vars = NULL) {
+  numeric_data <- data %>% select_if(is.numeric)
+  set.seed(123)  # For reproducibility
+  imputed_data <- mice(numeric_data, m = 1, method = "pmm", maxit = 5, printFlag = FALSE)
+  data[, names(numeric_data)] <- complete(imputed_data)
+  return(data)
+}
+
+# Function to impute Brand.Code using Multinomial Logistic Regression
+impute_brand_code <- function(data, target_col, predictor_col) {
+  # Ensure Brand.Code is a factor
+  data[[target_col]] <- factor(data[[target_col]])
+  
+  # Filter data with non-missing values
+  train_data_non_missing <- data[!is.na(data[[target_col]]), ]
+  
+  # Check if sufficient classes are present
+  if (length(unique(train_data_non_missing[[target_col]])) > 1) {
+    # Train multinomial logistic regression
+    model <- multinom(as.formula(paste(target_col, "~", predictor_col)), data = train_data_non_missing)
+    
+    # Predict missing values
+    missing_indices <- is.na(data[[target_col]])
+    data[[target_col]][missing_indices] <- predict(model, newdata = data[missing_indices, ])
+    
+    # Ensure the factor levels are consistent
+    data[[target_col]] <- factor(data[[target_col]], levels = levels(train_data_non_missing[[target_col]]))
+  } else {
+    # Use the mode class if only one class is present
+    warning("Only one class detected for imputation. Using mode imputation.")
+    mode_class <- names(sort(table(train_data_non_missing[[target_col]]), decreasing = TRUE))[1]
+    data[[target_col]][is.na(data[[target_col]])] <- mode_class
+  }
+  
+  return(data)
+}
+
+# Function to impute Brand.Code for datasets without PH values
+impute_brand_code_no_ph <- function(data, target_col, train_data) {
+  # Ensure Brand.Code is a factor
+  train_data[[target_col]] <- factor(train_data[[target_col]])
+  
+  # Use the mode of Brand.Code from the training data
+  mode_class <- names(sort(table(train_data[[target_col]]), decreasing = TRUE))[1]
+  data[[target_col]][is.na(data[[target_col]])] <- mode_class
+  data[[target_col]] <- factor(data[[target_col]], levels = levels(train_data[[target_col]]))
+  
+  return(data)
+}
+
+# Create copies of train_set and evaluation_set
+train_set_imputed <- train_set
+evaluation_set_imputed <- evaluation_set
+
+# Step 1: Impute numeric variables
+train_set_imputed <- impute_with_mice(train_set_imputed)
+evaluation_set_imputed <- impute_with_mice(evaluation_set_imputed)
+
+# Step 2: Impute Brand.Code
+train_set_imputed <- impute_brand_code(train_set_imputed, target_col = "Brand.Code", predictor_col = "PH")
+
+# Use mode-based imputation for the evaluation set as it lacks PH values
+evaluation_set_imputed <- impute_brand_code_no_ph(evaluation_set_imputed, target_col = "Brand.Code", train_data = train_set_imputed)
+
+# Step 3: Check for any remaining missing values
+check_missing <- function(data) {
+  missing_summary <- colSums(is.na(data))
+  missing_summary <- missing_summary[missing_summary > 0]
+  return(missing_summary)
+}
+
+# Check missing values
+cat("Missing values in train_set_imputed:\n")
+print(check_missing(train_set_imputed))
+
+cat("\nMissing values in evaluation_set_imputed:\n")
+print(check_missing(evaluation_set_imputed))
+
+# Structure of imputed datasets
+cat("\nStructure of Train Set Imputed:\n")
+head(train_set_imputed)
+
+cat("\nStructure of Evaluation Set Imputed:\n")
+str(evaluation_set_imputed)
+
+
+```
+
+
+## Visualize Imputed dataset
+
+### **Data Distribution and Characteristics**
+
+The imputed train dataset was analyzed to understand the distributions, skewness, and presence of outliers among its numeric variables. The goal was to identify patterns in the data, such as normality, skewed distributions, and extreme values, while also determining variables with near-zero variance that provide limited analytical value. Below is a summary of the findings:
+
+### **Distribution**
+- **Approximately Normal**: Variables such as "Carb.Volume," "Fill.Ounces," and "PSC" exhibit a roughly symmetric distribution, indicating a normal-like pattern.
+- **Skewed**: Variables like "Carb.Flow," "Hyd.Pressure3," "Density," and "Balling" display significant asymmetry, indicating skewness in the data.
+- **Multimodal**: Variables such as "MFR" and "Filler.Speed" exhibit multiple peaks, suggesting the presence of distinct subgroups or clusters in the data.
+
+### **Skewness**
+- **Right-Skewed**: Variables like "Carb.Flow," "Hyd.Pressure3," "MFR," and "Usage.cont" have a longer tail on the right side, indicating higher values are less frequent.
+- **Left-Skewed**: Variables such as "PSC.CO2," "Carb.Rel," and "PH" have a longer tail on the left side, with lower values being less frequent.
+
+### **Outliers**
+- **Significant Outliers**: Variables including "MFR," "Filler.Speed," "Oxygen.Filler," and "Bowl.Setpoint" have extreme values that deviate from the bulk of the data. These may require further investigation or transformation.
+
+### **Excluded Variables (Near-Zero Variance)**
+- Variables like "Carb.Temp" and "Hyd.Pressure1" have extremely low variance, indicating almost no variability across their observations. These were excluded from visualization as they provide limited information for analysis.
+
+
+```{r}
+# Install and load required libraries
+if (!requireNamespace("caret", quietly = TRUE)) {
+  install.packages("caret")
+}
+
+library(caret)
+library(dplyr)
+library(tidyr)
+
+# Reshape the imputed train_set to long format for numeric columns
+numeric_cols <- sapply(train_set_imputed, is.numeric)
+train_set_long <- pivot_longer(train_set_imputed,
+                               cols = all_of(names(train_set_imputed)[numeric_cols]),
+                               names_to = "variable",
+                               values_to = "value")
+
+# Identify variables with near-zero variance using caret::nearZeroVar
+nzv_indices <- nearZeroVar(train_set_imputed, saveMetrics = TRUE)
+
+# Extract variables with near-zero variance
+nzv_vars <- rownames(nzv_indices[nzv_indices$nzv == TRUE, ])
+
+# Output the list of variables with near-zero variance
+cat("Variables with near-zero variance (not plotted):\n")
+print(nzv_vars)
+
+# Filter out variables with near-zero variance from the long-format data
+train_set_long_filtered <- train_set_long %>%
+  filter(!variable %in% nzv_vars)
+
+# Clip extreme values to the 1st and 99th percentiles for better visualization
+train_set_long_filtered <- train_set_long_filtered %>%
+  group_by(variable) %>%
+  mutate(value = pmin(pmax(value, quantile(value, 0.01, na.rm = TRUE)), 
+                      quantile(value, 0.99, na.rm = TRUE))) %>%
+  ungroup()
+
+# Prepare the list of numeric variables for separate plotting
+numeric_variables <- unique(train_set_long_filtered$variable)
+
+# Set up the plotting area for histograms and boxplots
+par(mfrow = c(1, 2))  # 2 columns for histogram and boxplot side-by-side
+
+# Loop through each numeric variable to plot
+for (var in numeric_variables) {
+  # Filter data for the current variable
+  var_data <- train_set_long_filtered %>% filter(variable == var) %>% pull(value)
+  
+  # Plot histogram
+  hist(var_data, main = paste("Histogram of", var), 
+       xlab = var, breaks = 30, col = "lightblue", border = "black")
+  
+  # Plot boxplot
+  boxplot(var_data, main = paste("Boxplot of", var), 
+          horizontal = TRUE, col = "lightgreen")
+}
+
+
+
+# Reset plotting layout to default
+par(mfrow = c(1, 1))
+
+```
+
+
+
+## **Box-Cox Transformation: Preparation and Application**
+
+To enhance the quality and suitability of the dataset for statistical and machine learning models, specific preprocessing steps were undertaken. These steps ensure the data meets the requirements for transformations and improves its statistical properties:
+
+- **Adjust for Positive Values**:
+  - The Box-Cox transformation requires all input values to be strictly positive. Adjusting non-positive values ensures the transformation can be applied without errors while preserving the integrity of the data.
+
+- **Box-Cox Transformation**:
+  - The transformation stabilizes variance and makes the data distribution closer to normal, which is a common assumption for many statistical models. By identifying the optimal lambda for each numeric column, the data was transformed to enhance its suitability for downstream analysis, thereby improving the reliability and performance of statistical and machine learning models.
+
+```{r}
+# Load necessary libraries
+if (!requireNamespace("MASS", quietly = TRUE)) {
+  install.packages("MASS")
+}
+if (!requireNamespace("dplyr", quietly = TRUE)) {
+  install.packages("dplyr")
+}
+
+library(MASS)   # For Box-Cox transformation
+library(dplyr)  # For data manipulation
+
+# Specify columns to exclude (now including PH)
+exclude_cols <- c("Brand.Code", "PH")
+
+# Create copies of the imputed datasets for Box-Cox transformations
+train_set_boxcox <- train_set_imputed
+evaluation_set_boxcox <- evaluation_set_imputed
+
+# Identify numeric columns to process in the train set
+numeric_cols_train <- setdiff(names(train_set_imputed)[sapply(train_set_imputed, is.numeric)], exclude_cols)
+
+# Process each numeric column in the train set
+for (col in numeric_cols_train) {
+  tryCatch({
+    # Ensure 'col' is a valid column name
+    if (!col %in% names(train_set_imputed)) {
+      stop(paste("Column", col, "not found in train_set_imputed"))
+    }
+    
+    # Extract the column as a vector
+    column_data <- train_set_imputed[[col]]
+    
+    # Check for non-positive values and adjust
+    adjustment <- 0  # Default adjustment to zero
+    if (min(column_data, na.rm = TRUE) <= 0) {
+      adjustment <- abs(min(column_data, na.rm = TRUE)) + 0.001
+      column_data <- column_data + adjustment
+    }
+    
+    # Fit a simple linear model using the extracted vector
+    model <- lm(column_data ~ 1)
+    
+    # Perform Box-Cox transformation without plotting
+    bc <- boxcox(model, lambda = seq(-2, 2, by = 0.1), plotit = FALSE)
+    
+    # Find the lambda that maximizes the log-likelihood
+    optimal_lambda <- bc$x[which.max(bc$y)]
+    
+    # Apply the Box-Cox transformation
+    if (!is.na(optimal_lambda)) {
+      if (optimal_lambda == 0) {
+        train_set_boxcox[[col]] <- log(train_set_imputed[[col]] + adjustment)
+      } else {
+        train_set_boxcox[[col]] <- ((train_set_imputed[[col]] + adjustment)^optimal_lambda - 1) / optimal_lambda
+      }
+    }
+  }, error = function(e) {
+    cat(paste("Error processing column", col, ":", e$message, "in train_set_imputed\n"))
+  })
+}
+
+# Identify numeric columns to process in the evaluation set
+numeric_cols_test <- setdiff(names(evaluation_set_imputed)[sapply(evaluation_set_imputed, is.numeric)], exclude_cols)
+
+# Process each numeric column in the evaluation set
+for (col in numeric_cols_test) {
+  tryCatch({
+    # Ensure 'col' is a valid column name
+    if (!col %in% names(evaluation_set_imputed)) {
+      stop(paste("Column", col, "not found in evaluation_set_imputed"))
+    }
+    
+    # Extract the column as a vector
+    column_data <- evaluation_set_imputed[[col]]
+    
+    # Check for non-positive values and adjust
+    adjustment <- 0  # Default adjustment to zero
+    if (min(column_data, na.rm = TRUE) <= 0) {
+      adjustment <- abs(min(column_data, na.rm = TRUE)) + 0.001
+      column_data <- column_data + adjustment
+    }
+    
+    # Fit a simple linear model using the extracted vector
+    model <- lm(column_data ~ 1)
+    
+    # Perform Box-Cox transformation without plotting
+    bc <- boxcox(model, lambda = seq(-2, 2, by = 0.1), plotit = FALSE)
+    
+    # Find the lambda that maximizes the log-likelihood
+    optimal_lambda <- bc$x[which.max(bc$y)]
+    
+    # Apply the Box-Cox transformation
+    if (!is.na(optimal_lambda)) {
+      if (optimal_lambda == 0) {
+        evaluation_set_boxcox[[col]] <- log(evaluation_set_imputed[[col]] + adjustment)
+      } else {
+        evaluation_set_boxcox[[col]] <- ((evaluation_set_imputed[[col]] + adjustment)^optimal_lambda - 1) / optimal_lambda
+      }
+    }
+  }, error = function(e) {
+    cat(paste("Error processing column", col, ":", e$message, " in evaluation_set_imputed\n"))
+  })
+}
+
+# Output the structure of transformed train and test sets
+cat("\n\nStructure of Transformed Train Set (Box-Cox Applied):\n\n")
+str(train_set_boxcox)
+
+cat("\n\nStructure of Transformed Evaluation Set (Box-Cox Applied):\n\n")
+str(evaluation_set_boxcox)
+
+```
+
+## Skewness Comparison: Impact of Box-Cox Transformation
+
+- **Overview**:  
+  - The visualization compares the skewness of numeric variables before and after applying the Box-Cox transformation, demonstrating its effect on data symmetry.
+
+- **Key Observations**:  
+  - **Significant Skewness Reduction**: Variables such as `Hyd.Pressure2`, `Filler.Speed`, and `Carb.Volume` exhibit a substantial decrease in skewness, transitioning to more symmetric distributions conducive to modeling.  
+  - **Negligible Changes**: Variables like `Temperature` and `PH`, which already had low skewness, experienced minimal or no transformation effects, reflecting their approximate normality.  
+
+- **Conclusion**:  
+  - The Box-Cox transformation is particularly effective for variables with high initial skewness, improving their distribution symmetry. This transformation optimizes the data for statistical analysis and machine learning models that assume normally distributed inputs.
+  
+```{r}
+# Load necessary library
+if (!requireNamespace("e1071", quietly = TRUE)) {
+  install.packages("e1071")
+}
+library(e1071)  # For calculating skewness
+
+# Select numeric columns in the train_set_imputed and train_set_boxcox
+numeric_cols <- names(train_set_imputed)[sapply(train_set_imputed, is.numeric)]
+
+# Calculate skewness for train_set_imputed
+skewness_imputed <- sapply(train_set_imputed[numeric_cols], skewness, na.rm = TRUE)
+
+# Calculate skewness for train_set_boxcox
+skewness_boxcox <- sapply(train_set_boxcox[numeric_cols], skewness, na.rm = TRUE)
+
+# Combine the skewness results into a data frame for comparison
+skewness_comparison <- data.frame(
+  Variable = numeric_cols,
+  Skewness_Before = skewness_imputed,
+  Skewness_After = skewness_boxcox
+)
+
+# Reshape the data for plotting
+library(reshape2)
+skewness_long <- melt(skewness_comparison, id.vars = "Variable", 
+                      variable.name = "Skewness_Type", value.name = "Skewness")
+
+# Plot the skewness comparison
+library(ggplot2)
+ggplot(skewness_long, aes(x = Variable, y = Skewness, fill = Skewness_Type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +
+  labs(
+    title = "Skewness Comparison: Before and After Box-Cox Transformation",
+    x = "Variable",
+    y = "Skewness"
+  ) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 8), legend.position = "top")
+
+```
+
+## Remove Near-zero Variance Highly Correlated Variables for Model Suitability
+
+In the dataset, several near-zero variance and highly correlated variables were identified and removed, including `Balling`, `Alch.Rel`, `Balling.Lvl`, `Density`, and others. Removing these variables is crucial for models that are sensitive to multicollinearity or feature redundancy, such as:
+
+- **Linear Regression**: To prevent inflated variance estimates and ensure stable coefficients.
+- **Logistic Regression**: To enhance interpretability and maintain prediction accuracy.
+- **PCA (Principal Component Analysis)**: To avoid redundant variables dominating principal components.
+- **Regularized Models (e.g., Lasso, Ridge)**: While these models address multicollinearity, removing redundant variables improves computational efficiency.
+
+For **tree-based models** or **non-linear algorithms** (e.g., Random Forest, XGBoost), this step is generally unnecessary, as these models are robust to multicollinearity and handle feature interactions inherently. 
+
+
+```{r}
+# Load necessary libraries
+if (!requireNamespace("caret", quietly = TRUE)) {
+  install.packages("caret")
+}
+if (!requireNamespace("corrplot", quietly = TRUE)) {
+  install.packages("corrplot")
+}
+
+library(caret)
+library(corrplot)
+
+# Retain a copy of the full dataset for re-adding non-numeric variables
+full_data <- train_set_boxcox
+
+# Select only numeric variables from train_set_boxcox
+numeric_data <- train_set_boxcox[, sapply(train_set_boxcox, is.numeric)]
+
+# Step 1: Identify and remove near-zero variance variables
+nzv <- nearZeroVar(numeric_data, saveMetrics = TRUE)
+
+# Filter the near-zero variance variables
+nzv_vars <- rownames(nzv[nzv$nzv, ])  # Names of variables with near-zero variance
+cat("Near-zero variance variables removed:\n")
+print(nzv_vars)
+
+# Remove near-zero variance variables
+filtered_data_nzv <- numeric_data[, !(colnames(numeric_data) %in% nzv_vars)]
+
+# Step 2: Compute the correlation matrix (before removing highly correlated variables)
+correlations_before <- cor(filtered_data_nzv, use = "complete.obs")
+
+# Identify highly correlated variables (absolute correlation > 0.75)
+highCorr <- findCorrelation(correlations_before, cutoff = 0.75)
+
+# Get the names of highly correlated variables
+high_corr_vars <- colnames(filtered_data_nzv)[highCorr]
+
+# Create a data frame of highly correlated variables with their correlations
+high_corr_pairs <- subset(as.data.frame(as.table(correlations_before)), abs(Freq) > 0.75 & Var1 != Var2)
+
+# Print the number and names of highly correlated variables
+cat("\nNumber of highly correlated variables:", length(high_corr_vars), "\n")
+cat("Highly correlated variables removed:\n")
+print(high_corr_vars)
+
+# Remove highly correlated variables
+filtered_data_final <- filtered_data_nzv[, -highCorr]
+
+# Step 3: Add back `Brand.Code` and any other non-numeric variables
+non_numeric_vars <- setdiff(names(full_data), names(numeric_data))
+filtered_data_final <- cbind(filtered_data_final, full_data[non_numeric_vars])
+
+# Step 4: Compute the correlation matrix after removing highly correlated variables
+correlations_after <- cor(filtered_data_final[, sapply(filtered_data_final, is.numeric)], use = "complete.obs")
+
+# Step 5: Plot the correlation matrices (before and after)
+par(mfrow = c(1, 2))  # Set up side-by-side plots
+
+# Plot before removing highly correlated variables
+corrplot(correlations_before, order = "hclust", tl.cex = 0.8, addrect = 2)
+mtext("Before Removing\nHighly Correlated Variables", side = 3, line = 1, adj = 0.5, cex = 1.2)
+
+# Plot after removing highly correlated variables
+corrplot(correlations_after, order = "hclust", tl.cex = 0.8, addrect = 2)
+mtext("After Removing\nHighly Correlated Variables", side = 3, line = 1, adj = 0.5, cex = 1.2)
+
+# Reset plotting area
+par(mfrow = c(1, 1))
+
+# Step 6: Sort the data frame in descending order of the Freq column
+sorted_correlation_df <- high_corr_pairs[order(-high_corr_pairs$Freq), ]
+
+# Display the sorted data frame
+print(sorted_correlation_df)
+
+# Step 7: Check structure of the final dataset
+cat("\n\nStructure of Final Dataset:\n")
+str(filtered_data_final)
+
+```
+
+
+## Prepare Datasets for Models
+
+Below is the updated R code to prepare datasets for **gradient-based models**, **tree-based models**, and **statistical models**, reflecting the processing steps and appropriate handling of categorical variables like `Brand_Code`:
+
+### 1. Gradient-Based Models (e.g., Neural Networks, SVM, KNN)
+
+For gradient-based models:
+- **Min-max scaling** is applied to all numeric variables, including the target variable `PH`.
+- **One-hot encoding** is applied to `Brand_Code` without dropping any dummy variables.
+
+```{r}
+# Load required libraries
+if (!requireNamespace("caret", quietly = TRUE)) {
+  install.packages("caret")
+}
+if (!requireNamespace("fastDummies", quietly = TRUE)) {
+  install.packages("fastDummies")
+}
+
+library(caret)
+library(fastDummies)
+
+# Min-Max Scaling
+gradient_based_data <- filtered_data_final
+
+# Apply Min-Max scaling to all numeric variables
+numeric_cols <- names(gradient_based_data)[sapply(gradient_based_data, is.numeric)]
+min_max_scaler <- preProcess(gradient_based_data[, numeric_cols], method = "range")
+gradient_based_data[, numeric_cols] <- predict(min_max_scaler, gradient_based_data[, numeric_cols])
+
+# One-Hot Encoding without dropping any dummy
+gradient_based_data <- dummy_cols(gradient_based_data, 
+                                   select_columns = "Brand.Code", 
+                                   remove_first_dummy = FALSE, # Keep all dummy variables
+                                   remove_selected_columns = TRUE) # Drop the original categorical variable
+
+# Remove PH_cat column
+gradient_based_data <- gradient_based_data %>% dplyr::select(-PH_cat)
+
+# Check structure of the final dataset
+str(gradient_based_data)
+```
+
+### 2. Tree-Based Models (e.g., Random Forest, XGBoost, MARS)
+
+For tree-based models:
+- The dataset is used as is, without scaling numeric variables or transforming the target variable `PH`.
+- **Label encoding** is applied to the `Brand_Code` variable instead of one-hot encoding.
+
+```{r}
+# Label Encoding for Tree-Based Models
+tree_based_data <- train_set_boxcox
+
+# Convert Brand_Code to numeric labels
+tree_based_data$Brand_Code <- as.numeric(factor(tree_based_data$Brand.Code))
+
+# Remove PH_cat column
+tree_based_data <- tree_based_data %>% dplyr::select(-PH_cat)
+
+# Check structure of the final dataset
+str(tree_based_data)
+```
+
+### 3. Statistical Models (e.g., Linear Regression, Logistic Regression, PCA)
+
+For statistical models:
+- **Standardization** (mean centering and scaling to unit variance) is applied to all numeric variables, including the target variable `PH`.
+- **One-hot encoding** is applied to `Brand_Code`, with one dummy variable dropped to avoid multicollinearity.
+
+```{r}
+# Standardization
+statistical_models_data <- filtered_data_final
+
+# Apply Standardization to all numeric variables
+numeric_cols <- names(statistical_models_data)[sapply(statistical_models_data, is.numeric)]
+standard_scaler <- preProcess(statistical_models_data[, numeric_cols], method = c("center", "scale"))
+statistical_models_data[, numeric_cols] <- predict(standard_scaler, statistical_models_data[, numeric_cols])
+
+# One-Hot Encoding with one dummy dropped
+statistical_models_data <- dummy_cols(statistical_models_data, 
+                                      select_columns = "Brand.Code", 
+                                      remove_first_dummy = TRUE,  # Drop one dummy
+                                      remove_selected_columns = TRUE) # Drop the original categorical variable
+
+# Remove PH_cat column
+statistical_models_data <- statistical_models_data %>% dplyr::select(-PH_cat)
+
+# Check structure of the final dataset
+str(statistical_models_data)
+```
+
+## Model Building
+
+### Ordinary Least Squares (OLS) Models
+
+Multiple Linear Regression (MLR) models will be built.
+
+#### Process of OLS Modeling
+
+1. **Data Preparation**: Split the dataset into training (80%) and testing (20%) sets to evaluate model performance.
+2. **Baseline MLR Model**: Fit a multiple linear regression (MLR) model using all available features.
+3. **Feature Selection**: Use forward selection, backward elimination, stepwise selection, and recursive feature elimination (RFE) to identify subsets of relevant predictors.
+4. **Feature Engineering**: Create new features based on domain knowledge or interactions to improve model performance.
+5. **Advanced Models**: Incorporate interaction terms or polynomial features to capture complex relationships between variables.
+6. **Evaluation**: Evaluate models using metrics like \(R^2\), RMSE, and Test RMSE to identify the best-performing model.
+
+#### OLS Best Model
+
+The **Interaction Terms Model** emerged as the best model with the lowest **Test_RMSE** (0.7320), a relatively high **Train_R2** (0.6343), and a balanced generalization ability. This indicates that incorporating interactions between variables significantly enhances predictive performance.
+
+```{r}
+# Load required libraries
+if (!requireNamespace("caret", quietly = TRUE)) {
+  install.packages("caret")
+}
+if (!requireNamespace("Metrics", quietly = TRUE)) {
+  install.packages("Metrics")
+}
+library(caret)
+library(Metrics)
+library(dplyr)
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Split data into training (80%) and testing (20%) sets
+train_indices <- createDataPartition(statistical_models_data$PH, p = 0.8, list = FALSE)
+train_data <- statistical_models_data[train_indices, ]
+test_data <- statistical_models_data[-train_indices, ]
+
+### Full Model ###
+full_model <- lm(PH ~ ., data = train_data)
+
+# Null model (intercept only)
+null_model <- lm(PH ~ 1, data = train_data)
+
+# Function to evaluate models
+evaluate_model <- function(model, train_data, test_data) {
+  train_predictions <- predict(model, newdata = train_data)
+  test_predictions <- predict(model, newdata = test_data)
+  
+  # Training Metrics
+  train_r2 <- summary(model)$r.squared
+  train_mse <- mean((train_data$PH - train_predictions)^2)
+  train_rmse <- sqrt(train_mse)
+  
+  # Testing Metrics
+  test_r2 <- 1 - sum((test_data$PH - test_predictions)^2) / sum((test_data$PH - mean(test_data$PH))^2)
+  test_mse <- mean((test_data$PH - test_predictions)^2)
+  test_rmse <- sqrt(test_mse)
+  
+  return(list(
+    Train_R2 = train_r2,
+    Train_MSE = train_mse,
+    Train_RMSE = train_rmse,
+    Test_R2 = test_r2,
+    Test_MSE = test_mse,
+    Test_RMSE = test_rmse
+  ))
+}
+
+### 1. Forward Selection ###
+forward_model <- step(null_model, 
+                      scope = list(lower = null_model, upper = full_model),
+                      direction = "forward", 
+                      trace = 0)
+forward_metrics <- evaluate_model(forward_model, train_data, test_data)
+
+### 2. Backward Elimination ###
+backward_model <- step(full_model, 
+                       direction = "backward", 
+                       trace = 0)
+backward_metrics <- evaluate_model(backward_model, train_data, test_data)
+
+### 3. Stepwise Selection ###
+stepwise_model <- step(null_model, 
+                       scope = list(lower = null_model, upper = full_model),
+                       direction = "both", 
+                       trace = 0)
+stepwise_metrics <- evaluate_model(stepwise_model, train_data, test_data)
+
+### 4. Recursive Feature Elimination (RFE) ###
+control <- rfeControl(functions = lmFuncs, method = "cv", number = 10)
+rfe_model <- rfe(train_data[, -which(names(train_data) == "PH")], 
+                 train_data$PH, 
+                 sizes = c(1:10), 
+                 rfeControl = control)
+# Fit a model using RFE-selected predictors
+selected_vars <- predictors(rfe_model)
+rfe_final_model <- lm(as.formula(paste("PH ~", paste(selected_vars, collapse = " + "))), data = train_data)
+rfe_metrics <- evaluate_model(rfe_final_model, train_data, test_data)
+
+### 5. Interaction Terms ###
+interaction_model <- lm(PH ~ .^2, data = train_data) # Includes all pairwise interactions
+interaction_metrics <- evaluate_model(interaction_model, train_data, test_data)
+
+### 6. Polynomial Features ###
+polynomial_formula <- as.formula(
+  paste("PH ~ poly(Fill.Ounces, 2) + poly(PC.Volume, 2) + poly(Carb.Pressure, 2) + .", collapse = "+")
+)
+polynomial_model <- lm(polynomial_formula, data = train_data)
+polynomial_metrics <- evaluate_model(polynomial_model, train_data, test_data)
+
+### 7. Feature Engineering ###
+train_data_fe <- train_data %>%
+  mutate(
+    Pressure_Ratio = Fill.Pressure / Carb.Pressure,
+    Temperature_Deviation = abs(Temperature - mean(Temperature, na.rm = TRUE)),
+    PSC_Carb_Interaction = PSC * Carb.Pressure
+  )
+test_data_fe <- test_data %>%
+  mutate(
+    Pressure_Ratio = Fill.Pressure / Carb.Pressure,
+    Temperature_Deviation = abs(Temperature - mean(train_data$Temperature, na.rm = TRUE)),
+    PSC_Carb_Interaction = PSC * Carb.Pressure
+  )
+fe_model <- lm(PH ~ ., data = train_data_fe)
+fe_metrics <- evaluate_model(fe_model, train_data_fe, test_data_fe)
+
+### Combine All Metrics into a Single DataFrame ###
+metrics_df <- data.frame(
+  Model = c(
+    "MLR (All Features Included)", 
+    "Forward Selection", 
+    "Backward Elimination", 
+    "Stepwise Selection", 
+    "Recursive Feature Elimination (RFE)", 
+    "Interaction Terms", 
+    "Polynomial Features", 
+    "Feature Engineering"
+  ),
+  Train_R2 = c(
+    summary(full_model)$r.squared, 
+    forward_metrics$Train_R2, 
+    backward_metrics$Train_R2, 
+    stepwise_metrics$Train_R2, 
+    rfe_metrics$Train_R2, 
+    interaction_metrics$Train_R2, 
+    polynomial_metrics$Train_R2, 
+    fe_metrics$Train_R2
+  ),
+  Test_R2 = c(
+    evaluate_model(full_model, train_data, test_data)$Test_R2, 
+    forward_metrics$Test_R2, 
+    backward_metrics$Test_R2, 
+    stepwise_metrics$Test_R2, 
+    rfe_metrics$Test_R2, 
+    interaction_metrics$Test_R2, 
+    polynomial_metrics$Test_R2, 
+    fe_metrics$Test_R2
+  ),
+  Train_RMSE = c(
+    evaluate_model(full_model, train_data, test_data)$Train_RMSE, 
+    forward_metrics$Train_RMSE, 
+    backward_metrics$Train_RMSE, 
+    stepwise_metrics$Train_RMSE, 
+    rfe_metrics$Train_RMSE, 
+    interaction_metrics$Train_RMSE, 
+    polynomial_metrics$Train_RMSE, 
+    fe_metrics$Train_RMSE
+  ),
+  Test_RMSE = c(
+    evaluate_model(full_model, train_data, test_data)$Test_RMSE, 
+    forward_metrics$Test_RMSE, 
+    backward_metrics$Test_RMSE, 
+    stepwise_metrics$Test_RMSE, 
+    rfe_metrics$Test_RMSE, 
+    interaction_metrics$Test_RMSE, 
+    polynomial_metrics$Test_RMSE, 
+    fe_metrics$Test_RMSE
+  )
+)
+
+
+# Sort metrics_df by Test_RMSE in ascending order
+metrics_df <- metrics_df %>%
+  arrange(Test_RMSE)
+
+# Display the sorted DataFrame
+cat("\nSorted Metrics DataFrame (by Test_RMSE):\n")
+print(metrics_df)
+
+
+# Plot Metrics Comparison
+library(ggplot2)
+metrics_long <- metrics_df %>%
+  pivot_longer(cols = c(Train_RMSE, Test_RMSE), names_to = "Metric", values_to = "Value")
+
+ggplot(metrics_long, aes(x = Model, y = Value, fill = Metric)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal() +
+  labs(title = "Model Performance Comparison", y = "RMSE", x = "Model") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+
+#### MLR Best Model Residual Analysis (Interaction Terms Model)
+
+**Residual Diagnostics Statement:**
+
+1. **Residuals vs Fitted Plot**: The residuals exhibit a random scatter around the zero line, indicating linearity. However, some slight heteroscedasticity may be present as the spread of residuals appears to increase slightly for higher fitted values.
+
+2. **Q-Q Plot**: The residuals generally follow the theoretical quantiles, suggesting that the normality assumption is approximately satisfied, though some deviation is observed in the tails.
+
+3. **Scale-Location Plot**: The spread of standardized residuals is relatively consistent across fitted values, supporting the homoscedasticity assumption.
+
+4. **Residuals vs Leverage Plot**: A few high-leverage points are present, as indicated by Cook's distance. These points may influence the model significantly and warrant further investigation.
+
+Overall, the diagnostic plots indicate that the model assumptions are reasonably met, though some high-leverage points may require attention.
+
+```{r}
+# Generate diagnostic plots for the training model
+par(mfrow = c(2, 2))
+plot(interaction_model)
+par(mfrow = c(1, 1))  # Reset plotting layout
+
+summary(interaction_model)
+```
+
+### Partial Least Squares (PLS) Models
+
+#### PLS Modeling Process
+
+1. **Data Preparation**:
+   - The data was split into training (80%) and testing (20%) sets.
+   - Predictors (`train_X`, `test_X`) and the response variable (`train_y`, `test_y`) were prepared.
+
+2. **Model Training and Evaluation**:
+   - **PLS and PCR**: Partial Least Squares (PLS) and Principal Component Regression (PCR) were trained using cross-validation to select the optimal number of components. Predictions were made for both training and testing datasets, and RMSE and \(R^2\) were calculated.
+   - **Ridge and Lasso Regression**: Ridge (alpha=0) and Lasso (alpha=1) regression models were trained using cross-validation to select the optimal regularization parameter (\(\lambda\)). Predictions were made on the datasets, and metrics were computed.
+   - **Elastic Net**: Elastic Net, combining Lasso and Ridge, was tuned over a grid of \(\lambda\) and \(\alpha\) values using cross-validation. Predictions and metrics were computed.
+
+3. **Result Compilation**:
+   - RMSE and \(R^2\) for both training and testing datasets were consolidated into a DataFrame for all models.
+   - Models were ranked by Test RMSE in ascending order.
+
+#### Best Model Selection
+
+Based on the sorted DataFrame output, **Lasso Regression** is the best-performing model, having the lowest Test RMSE (\(0.8078\)) and competitive \(R^2\) values. This suggests that it balances bias and variance effectively for this dataset. 
+
+If further analysis is required or if you want visualizations of model performances or additional fine-tuning, let me know!
+
+```{r}
+# Install required packages
+if (!requireNamespace("pls", quietly = TRUE)) {
+  install.packages("pls")
+}
+if (!requireNamespace("caret", quietly = TRUE)) {
+  install.packages("caret")
+}
+if (!requireNamespace("glmnet", quietly = TRUE)) {
+  install.packages("glmnet")
+}
+
+# Load required libraries
+library(pls)
+library(caret)
+library(glmnet)
+
+
+# Prepare predictors (X) and response (y)
+train_X <- as.matrix(train_data[, -which(names(train_data) == "PH")])
+train_y <- train_data$PH
+test_X <- as.matrix(test_data[, -which(names(test_data) == "PH")])
+test_y <- test_data$PH
+
+### 1. Partial Least Squares Regression (PLSR)
+# Fit PLS model with cross-validation
+pls_model <- plsr(PH ~ ., data = train_data, validation = "CV")
+
+# Determine the optimal number of components
+optimal_ncomp <- selectNcomp(pls_model, method = "onesigma", plot = FALSE)
+
+# Predict on the training and test sets using the optimal number of components
+pls_train_predictions <- predict(pls_model, newdata = train_X, ncomp = optimal_ncomp)
+pls_test_predictions <- predict(pls_model, newdata = test_X, ncomp = optimal_ncomp)
+
+# Evaluate the PLS model
+pls_train_rmse <- RMSE(pls_train_predictions, train_y)
+pls_test_rmse <- RMSE(pls_test_predictions, test_y)
+pls_train_r2 <- cor(pls_train_predictions, train_y)^2
+pls_test_r2 <- cor(pls_test_predictions, test_y)^2
+
+### 2. Principal Component Regression (PCR)
+# Fit PCR model with cross-validation
+pcr_model <- pcr(PH ~ ., data = train_data, validation = "CV")
+
+# Determine the optimal number of components
+optimal_ncomp_pcr <- selectNcomp(pcr_model, method = "onesigma", plot = FALSE)
+
+# Predict on the training and test sets using the optimal number of components
+pcr_train_predictions <- predict(pcr_model, newdata = train_X, ncomp = optimal_ncomp_pcr)
+pcr_test_predictions <- predict(pcr_model, newdata = test_X, ncomp = optimal_ncomp_pcr)
+
+# Evaluate the PCR model
+pcr_train_rmse <- RMSE(pcr_train_predictions, train_y)
+pcr_test_rmse <- RMSE(pcr_test_predictions, test_y)
+pcr_train_r2 <- cor(pcr_train_predictions, train_y)^2
+pcr_test_r2 <- cor(pcr_test_predictions, test_y)^2
+
+### 3. Ridge Regression
+ridge_model <- glmnet(train_X, train_y, alpha = 0) # alpha = 0 for Ridge
+cv_ridge <- cv.glmnet(train_X, train_y, alpha = 0) # Cross-validation for Ridge
+ridge_lambda <- cv_ridge$lambda.min # Optimal lambda
+
+# Predict on the training and test sets
+ridge_train_predictions <- predict(cv_ridge, newx = train_X, s = ridge_lambda)
+ridge_test_predictions <- predict(cv_ridge, newx = test_X, s = ridge_lambda)
+
+# Evaluate Ridge model
+ridge_train_rmse <- RMSE(ridge_train_predictions, train_y)
+ridge_test_rmse <- RMSE(ridge_test_predictions, test_y)
+ridge_train_r2 <- cor(ridge_train_predictions, train_y)^2
+ridge_test_r2 <- cor(ridge_test_predictions, test_y)^2
+
+### 4. Lasso Regression
+lasso_model <- glmnet(train_X, train_y, alpha = 1) # alpha = 1 for Lasso
+cv_lasso <- cv.glmnet(train_X, train_y, alpha = 1) # Cross-validation for Lasso
+lasso_lambda <- cv_lasso$lambda.min # Optimal lambda
+
+# Predict on the training and test sets
+lasso_train_predictions <- predict(cv_lasso, newx = train_X, s = lasso_lambda)
+lasso_test_predictions <- predict(cv_lasso, newx = test_X, s = lasso_lambda)
+
+# Evaluate Lasso model
+lasso_train_rmse <- RMSE(lasso_train_predictions, train_y)
+lasso_test_rmse <- RMSE(lasso_test_predictions, test_y)
+lasso_train_r2 <- cor(lasso_train_predictions, train_y)^2
+lasso_test_r2 <- cor(lasso_test_predictions, test_y)^2
+
+### 5. Elastic Net
+elastic_net_model <- train(
+  x = train_X, y = train_y,
+  method = "glmnet",
+  tuneLength = 10,
+  trControl = trainControl(method = "cv", number = 10),
+  preProc = c("center", "scale")
+)
+
+# Best Elastic Net model
+best_enet <- elastic_net_model$finalModel
+best_enet_lambda <- elastic_net_model$bestTune$lambda
+best_enet_alpha <- elastic_net_model$bestTune$alpha
+
+# Predict on the training and test sets
+enet_train_predictions <- predict(best_enet, newx = train_X, s = best_enet_lambda)
+enet_test_predictions <- predict(best_enet, newx = test_X, s = best_enet_lambda)
+
+# Evaluate Elastic Net model
+enet_train_rmse <- RMSE(enet_train_predictions, train_y)
+enet_test_rmse <- RMSE(enet_test_predictions, test_y)
+enet_train_r2 <- cor(enet_train_predictions, train_y)^2
+enet_test_r2 <- cor(enet_test_predictions, test_y)^2
+
+### Combine Results into a Data Frame
+results_df <- data.frame(
+  Model = c("PLS", "PCR", "Ridge Regression", "Lasso Regression", "Elastic Net"),
+  Train_R2 = c(pls_train_r2, pcr_train_r2, ridge_train_r2, lasso_train_r2, enet_train_r2),
+  Test_R2 = c(pls_test_r2, pcr_test_r2, ridge_test_r2, lasso_test_r2, enet_test_r2),
+  Train_RMSE = c(pls_train_rmse, pcr_train_rmse, ridge_train_rmse, lasso_train_rmse, enet_train_rmse),
+  Test_RMSE = c(pls_test_rmse, pcr_test_rmse, ridge_test_rmse, lasso_test_rmse, enet_test_rmse)
+)
+
+# Sort metrics_df by Test_RMSE in ascending order
+results_df <- results_df %>%
+  arrange(Test_RMSE)
+
+# Display the sorted DataFrame
+cat("\nSorted Metrics DataFrame (by Test_RMSE):\n")
+print(results_df)
+
+```
+
+
+#### Residual Analysis, Variable Importance and Cross-Validation of the Best PLS (Lasso) Model
+
+
+The diagnostic plots and the cross-validation summary for the Lasso model reveal the following:
+
+1. **Residual Analysis**:
+   - The residuals vs. fitted plot indicates no obvious patterns, suggesting that the model does not suffer from severe non-linearity or heteroscedasticity.
+   - The Q-Q plot indicates that the residuals approximately follow a normal distribution, with minor deviations at the tails.
+   - The scale-location plot (√|Standardized Residuals| vs. Fitted Values) shows that the variance is relatively constant, further supporting the assumption of homoscedasticity.
+   - The residuals vs. leverage plot does not show influential points with high leverage, suggesting stability in the model.
+
+2. **Cross-Validation Results**:
+   - The optimal lambda value for minimizing mean squared error (MSE) is **0.001266**, which resulted in 23 nonzero predictors being retained in the model.
+   - The lambda at the one standard error rule (λ.1se = 0.024844) selects a simpler model with 17 predictors, which sacrifices minimal predictive performance for increased parsimony.
+
+3. **Conclusion**:
+   The Lasso model achieves a balance between model complexity and predictive accuracy. It reduces the number of predictors to avoid overfitting while maintaining satisfactory performance metrics. These characteristics make it a robust choice for modeling, especially when interpretability and variable selection are priorities.
+   
+##### 1. Residual Plots for Best PLS (Lasso) Model
+
+```{r}
+# Generate diagnostic plots for the Lasso model
+par(mfrow = c(2, 2))  # Set layout for 2x2 plots
+
+# Residuals vs. Fitted
+plot(
+  as.numeric(lasso_test_predictions), 
+  as.numeric(test_y - lasso_test_predictions),
+  xlab = "Fitted Values",
+  ylab = "Residuals",
+  main = "Residuals vs Fitted",
+  pch = 20,
+  col = "black"
+)
+abline(h = 0, col = "red", lty = 2)
+
+# Q-Q Plot
+qqnorm(as.numeric(test_y - lasso_test_predictions),
+       main = "Normal Q-Q Plot",
+       pch = 20,
+       col = "black")
+qqline(as.numeric(test_y - lasso_test_predictions), col = "red")
+
+# Scale-Location Plot
+std_residuals <- scale(as.numeric(test_y - lasso_test_predictions))
+plot(
+  as.numeric(lasso_test_predictions),
+  sqrt(abs(std_residuals)),
+  xlab = "Fitted Values",
+  ylab = "√|Standardized Residuals|",
+  main = "Scale-Location",
+  pch = 20,
+  col = "black"
+)
+abline(h = 0, col = "red", lty = 2)
+
+# Residuals vs Leverage Plot (approximation for test data)
+hat_values_test <- diag(test_X %*% solve(t(train_X) %*% train_X) %*% t(test_X))  # Approx. Hat matrix for test
+plot(
+  hat_values_test,
+  std_residuals,
+  xlab = "Leverage",
+  ylab = "Standardized Residuals",
+  main = "Residuals vs Leverage",
+  pch = 20,
+  col = "black"
+)
+abline(h = 0, col = "red", lty = 2)
+
+par(mfrow = c(1, 1))  # Reset plotting layout
+
+# Print summary of the Lasso model
+print(cv_lasso)
+
+
+```
+
+##### 1. Variable Importance for Best PLS (Lasso) Model
+
+```{r}
+# Extract coefficients for Lasso model
+lasso_coefficients <- coef(cv_lasso, s = lasso_lambda)
+
+# Create a data frame for variable importance (absolute coefficients)
+importance_df_lasso <- data.frame(
+  Variable = rownames(lasso_coefficients),
+  Importance = abs(as.numeric(lasso_coefficients))
+)
+
+# Remove intercept from the importance calculation
+importance_df_lasso <- importance_df_lasso[importance_df_lasso$Variable != "(Intercept)", ]
+
+# Sort by importance
+importance_df_lasso <- importance_df_lasso[order(-importance_df_lasso$Importance), ]
+
+# Plot variable importance for Lasso
+library(ggplot2)
+ggplot(importance_df_lasso, aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_point() +
+  coord_flip() +
+  labs(title = "Lasso Variable Importance", x = "Variables", y = "Importance") +
+  theme_minimal()
+
+
+```
+
+##### 2. Cross-Validation for Lasso or Elastic Net
+
+For Lasso (`alpha = 1`) or Elastic Net (`0 < alpha < 1`), use the same approach with `glmnet`.
+
+```{r}
+# Lasso Regression
+cv_lasso <- cv.glmnet(train_X, train_y, alpha = 1)
+
+# Elastic Net
+cv_enet <- train(
+  x = train_X, y = train_y,
+  method = "glmnet",
+  tuneGrid = expand.grid(
+    alpha = seq(0, 1, by = 0.1),
+    lambda = seq(0.001, 0.1, length.out = 10)
+  ),
+  trControl = trainControl(method = "cv")
+)
+
+# Extract Best Model and Plot
+plot(cv_lasso, main = "Cross-Validation Profile for Lasso Regression")
+```
+
+
+### Non-Linear Regression Models
+
+#### Modeling Data and Function
+
+```{r}
+# Install required packages
+if (!requireNamespace("caret", quietly = TRUE)) {
+  install.packages("caret")
+}
+if (!requireNamespace("earth", quietly = TRUE)) {
+  install.packages("earth")
+}
+if (!requireNamespace("e1071", quietly = TRUE)) {
+  install.packages("e1071")
+}
+if (!requireNamespace("nnet", quietly = TRUE)) {
+  install.packages("nnet")
+}
+
+# Load libraries
+library(caret)
+library(earth)  # For MARS
+library(e1071)  # For SVR
+library(nnet)   # For ANN
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Data preparation
+# Assuming gradient_based_data or tree_based_data is already loaded
+data <- gradient_based_data
+train_indices <- createDataPartition(data$PH, p = 0.8, list = FALSE)
+train_data <- data[train_indices, ]
+test_data <- data[-train_indices, ]
+train_X <- train_data[, -which(names(train_data) == "PH")]
+train_y <- train_data$PH
+test_X <- test_data[, -which(names(test_data) == "PH")]
+test_y <- test_data$PH
+
+# Function to compute AIC and BIC
+compute_aic_bic <- function(model, test_X, test_y) {
+  predictions <- predict(model, newdata = test_X)
+  residuals <- test_y - predictions
+  n <- length(test_y)
+  k <- length(coef(model))
+  mse <- mean(residuals^2)
+  loglik <- -n / 2 * log(2 * pi * mse) - n / 2
+  aic <- -2 * loglik + 2 * k
+  bic <- -2 * loglik + log(n) * k
+  return(c(AIC = aic, BIC = bic))
+}
+
+```
+
+#### KNN Model
+
+```{r}
+### 1. K-Nearest Neighbors (KNN)
+knn_model <- train(
+  x = train_X, y = train_y,
+  method = "knn",
+  tuneLength = 10,
+  trControl = trainControl(method = "cv", number = 10)  # Removed preProc
+)
+knn_predictions <- predict(knn_model, test_X)
+knn_rmse <- RMSE(knn_predictions, test_y)
+knn_r2 <- cor(knn_predictions, test_y)^2
+knn_aic_bic <- compute_aic_bic(knn_model, test_X, test_y)
+
+```
+
+
+#### SVM Model
+
+```{r}
+### 3. Support Vector Regression (SVR)
+svr_model <- train(
+  x = train_X, y = train_y,
+  method = "svmRadial",
+  tuneLength = 10,
+  trControl = trainControl(method = "cv", number = 10)  # Removed preProc
+)
+svr_predictions <- predict(svr_model, test_X)
+svr_rmse <- RMSE(svr_predictions, test_y)
+svr_r2 <- cor(svr_predictions, test_y)^2
+svr_aic_bic <- compute_aic_bic(svr_model, test_X, test_y)
+
+```
+
+
+#### MARS Model
+
+```{r}
+### 2. Multivariate Adaptive Regression Splines (MARS)
+# Assuming tree_based_data is used for MARS
+data <- tree_based_data  # Switch to untransformed data for MARS
+train_indices <- createDataPartition(data$PH, p = 0.8, list = FALSE)
+train_data <- data[train_indices, ]
+test_data <- data[-train_indices, ]
+train_X <- train_data[, -which(names(train_data) == "PH")]
+train_y <- train_data$PH
+test_X <- test_data[, -which(names(test_data) == "PH")]
+test_y <- test_data$PH
+
+mars_model <- train(
+  x = train_X, y = train_y,
+  method = "earth",
+  tuneLength = 10,
+  trControl = trainControl(method = "cv", number = 10)  # No preprocessing needed
+)
+mars_predictions <- predict(mars_model, test_X)
+mars_rmse <- RMSE(mars_predictions, test_y)
+mars_r2 <- cor(mars_predictions, test_y)^2
+mars_aic_bic <- compute_aic_bic(mars_model, test_X, test_y)
+
+```
+
+
+#### ANN Model
+
+```{r}
+# Load required libraries
+if (!requireNamespace("caret", quietly = TRUE)) {
+  install.packages("caret")
+}
+if (!requireNamespace("nnet", quietly = TRUE)) {
+  install.packages("nnet")
+}
+library(caret)
+library(nnet)
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Data Preparation
+data <- gradient_based_data  # Assuming gradient_based_data is min-max scaled
+train_indices <- createDataPartition(data$PH, p = 0.8, list = FALSE)
+train_data <- data[train_indices, ]
+test_data <- data[-train_indices, ]
+train_X <- train_data[, -which(names(train_data) == "PH")]
+train_y <- train_data$PH
+test_X <- test_data[, -which(names(test_data) == "PH")]
+test_y <- test_data$PH
+
+### ANN Model
+# Train the model using caret
+ann_model <- train(
+  x = train_X, y = train_y,
+  method = "nnet",
+  tuneLength = 10,
+  trControl = trainControl(method = "cv", number = 5),
+  preProc = NULL,  # No further preprocessing since gradient_based_data is already scaled
+  linout = TRUE,   # For regression tasks
+  trace = FALSE    # Suppress training output
+)
+
+# Generate predictions on the test set
+ann_predictions <- predict(ann_model, test_X)
+
+# Evaluate the model
+ann_rmse <- RMSE(ann_predictions, test_y)
+ann_r2 <- cor(ann_predictions, test_y)^2
+
+# Function to compute AIC and BIC
+compute_aic_bic <- function(model, test_X, test_y) {
+  predictions <- predict(model, newdata = test_X)
+  residuals <- test_y - predictions
+  n <- length(test_y)
+  k <- length(coef(model$finalModel))  # Number of parameters in the final model
+  mse <- mean(residuals^2)
+  loglik <- -n / 2 * log(2 * pi * mse) - n / 2
+  aic <- -2 * loglik + 2 * k
+  bic <- -2 * loglik + log(n) * k
+  return(c(AIC = aic, BIC = bic))
+}
+
+# Compute AIC and BIC for the ANN model
+ann_aic_bic <- compute_aic_bic(ann_model, test_X, test_y)
+
+# Display results
+cat("ANN Results:\n")
+cat("Train RMSE:", ann_model$results$RMSE[which.min(ann_model$results$RMSE)], "\n")
+cat("Test RMSE:", ann_rmse, "\n")
+cat("Train R^2:", ann_model$results$Rsquared[which.min(ann_model$results$RMSE)], "\n")
+cat("Test R^2:", ann_r2, "\n")
+cat("AIC:", ann_aic_bic["AIC"], "\n")
+cat("BIC:", ann_aic_bic["BIC"], "\n")
+
+```
+
+
+```{r}
+# Combine results into a data frame
+results_df <- data.frame(
+  Model = c("KNN", "MARS", "SVR"),
+  Train_RMSE = c(knn_model$results$RMSE[which.min(knn_model$results$RMSE)],
+                 mars_model$results$RMSE[which.min(mars_model$results$RMSE)],
+                 svr_model$results$RMSE[which.min(svr_model$results$RMSE)]
+                 ),
+  Test_RMSE = c(knn_rmse, mars_rmse, svr_rmse),
+  Train_R2 = c(knn_model$results$Rsquared[which.min(knn_model$results$RMSE)],
+               mars_model$results$Rsquared[which.min(mars_model$results$RMSE)],
+               svr_model$results$Rsquared[which.min(svr_model$results$RMSE)]
+               ),
+  Test_R2 = c(knn_r2, mars_r2, svr_r2),
+  AIC = c(knn_aic_bic["AIC"], mars_aic_bic["AIC"], svr_aic_bic["AIC"]),
+  BIC = c(knn_aic_bic["BIC"], mars_aic_bic["BIC"], svr_aic_bic["BIC"])
+)
+
+# Sort by Test_RMSE
+results_df <- results_df[order(results_df$Test_RMSE), ]
+
+# Display results
+print(results_df)
+
+
+```
+
+
+#### ANN to be included later because it's taking too long to run.
+
+```{r}
+
+### 4. Artificial Neural Network (ANN)
+
+ann_model <- train(
+x = train_X, y = train_y,
+method = "nnet",
+tuneLength = 10,
+trControl = trainControl(method = "cv", number = 10),
+preProc = c("center", "scale"),
+linout = TRUE
+)
+ann_predictions <- predict(ann_model, test_X)
+ann_rmse <- RMSE(ann_predictions, test_y)
+ann_r2 <- cor(ann_predictions, test_y)^2
+ann_aic_bic <- compute_aic_bic(ann_model, test_X, test_y)
+
+# Combine results into a data frame
+results_df <- data.frame(
+  Model = c("KNN", "MARS", "SVR"), # "ANN"),
+  Train_RMSE = c(knn_model$results$RMSE[which.min(knn_model$results$RMSE)],
+                 mars_model$results$RMSE[which.min(mars_model$results$RMSE)],
+                 svr_model$results$RMSE[which.min(svr_model$results$RMSE)],
+                 ann_model$results$RMSE[which.min(ann_model$results$RMSE)]
+                 ),
+  Test_RMSE = c(knn_rmse, mars_rmse, svr_rmse, ann_rmse),
+  Train_R2 = c(knn_model$results$Rsquared[which.min(knn_model$results$RMSE)],
+               mars_model$results$Rsquared[which.min(mars_model$results$RMSE)],
+               svr_model$results$Rsquared[which.min(svr_model$results$RMSE)],
+               ann_model$results$Rsquared[which.min(ann_model$results$RMSE)]
+               ),
+  Test_R2 = c(knn_r2, mars_r2, svr_r2), #, ann_r2),
+  AIC = c(knn_aic_bic["AIC"], mars_aic_bic["AIC"], svr_aic_bic["AIC"], ann_aic_bic["AIC"]),
+  BIC = c(knn_aic_bic["BIC"], mars_aic_bic["BIC"], svr_aic_bic["BIC"], ann_aic_bic["BIC"])
+)
+
+# Sort by Test_RMSE
+results_df <- results_df[order(results_df$Test_RMSE), ]
+
+# Display results
+print(results_df)
+
+```
+
+
+### Regression Tree Models
+
+#### Prepare Modeling Data
+
+```{r}
+# Install required packages
+if (!requireNamespace("caret", quietly = TRUE)) {
+  install.packages("caret")
+}
+if (!requireNamespace("ipred", quietly = TRUE)) {
+  install.packages("ipred")
+}
+if (!requireNamespace("randomForest", quietly = TRUE)) {
+  install.packages("randomForest")
+}
+if (!requireNamespace("gbm", quietly = TRUE)) {
+  install.packages("gbm")
+}
+if (!requireNamespace("xgboost", quietly = TRUE)) {
+  install.packages("xgboost")
+}
+# Install and load doParallel
+if (!requireNamespace("doParallel", quietly = TRUE)) {
+  install.packages("doParallel")
+}
+
+library(doParallel)
+# Load libraries
+library(caret)         # For model training and cross-validation
+library(ipred)         # For Bagged Trees
+library(randomForest)  # For Random Forest
+library(gbm)           # For Gradient Boosting Machine
+library(xgboost)       # For Extreme Gradient Boosting
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Data preparation
+# Using tree_based_data for modeling
+data <- tree_based_data
+
+# Split the data into training and testing sets (80% training, 20% testing)
+train_indices <- createDataPartition(data$PH, p = 0.8, list = FALSE)
+train_data <- data[train_indices, ]
+test_data <- data[-train_indices, ]
+
+# Separate predictors (X) and response (y)
+train_X <- train_data[, -which(names(train_data) == "PH")]
+train_y <- train_data$PH
+test_X <- test_data[, -which(names(test_data) == "PH")]
+test_y <- test_data$PH
+
+```
+
+
+#### Bagged Trees Model
+
+```{r}
+### Bagged Trees Model
+library(ipred)
+library(doParallel)
+
+# Set up parallel processing
+cl <- makeCluster(detectCores() - 1)
+registerDoParallel(cl)
+
+set.seed(123)
+bagged_model <- train(
+  x = train_X, y = train_y,
+  method = "treebag",
+  trControl = trainControl(method = "cv", number = 10, allowParallel = TRUE)
+)
+
+bagged_predictions <- predict(bagged_model, test_X)
+bagged_rmse <- RMSE(bagged_predictions, test_y)
+bagged_r2 <- cor(bagged_predictions, test_y)^2
+
+# Skip AIC/BIC for bagging
+bagged_aic_bic <- c(AIC = NA, BIC = NA)
+
+# Stop parallel processing
+stopCluster(cl)
+registerDoSEQ()
+
+print(bagged_rmse)
+print(bagged_r2)
+print(bagged_aic_bic)
+
+```
+
+
+#### Random Forest Model
+
+```{r}
+### Random Forest Model
+library(randomForest)
+library(doParallel)
+
+# Set up parallel processing
+cl <- makeCluster(detectCores() - 1)
+registerDoParallel(cl)
+
+set.seed(123)
+rf_model <- train(
+  x = train_X, y = train_y,
+  method = "rf",
+  tuneLength = 10,
+  trControl = trainControl(method = "cv", number = 10, allowParallel = TRUE)
+)
+
+rf_predictions <- predict(rf_model, test_X)
+rf_rmse <- RMSE(rf_predictions, test_y)
+rf_r2 <- cor(rf_predictions, test_y)^2
+
+# Skip AIC/BIC for Random Forest
+rf_aic_bic <- c(AIC = NA, BIC = NA)
+
+# Stop parallel processing
+stopCluster(cl)
+registerDoSEQ()
+
+print(rf_rmse)
+print(rf_r2)
+print(rf_aic_bic)
+
+```
+
+
+#### Boosting (GBM) Model
+
+```{r}
+### Boosting (GBM) Model
+library(gbm)
+library(doParallel)
+
+# Set up parallel processing
+cl <- makeCluster(detectCores() - 1)
+registerDoParallel(cl)
+
+set.seed(123)
+boost_model <- train(
+  x = train_X, y = train_y,
+  method = "gbm",
+  tuneLength = 10,
+  trControl = trainControl(method = "cv", number = 10, allowParallel = TRUE),
+  verbose = FALSE
+)
+
+boost_predictions <- predict(boost_model, test_X)
+boost_rmse <- RMSE(boost_predictions, test_y)
+boost_r2 <- cor(boost_predictions, test_y)^2
+
+# Skip AIC/BIC for GBM
+boost_aic_bic <- c(AIC = NA, BIC = NA)
+
+# Stop parallel processing
+stopCluster(cl)
+registerDoSEQ()
+
+```
+
+
+#### XGBoost Model
+
+```{r}
+### XGBoost Model
+library(xgboost)
+library(doParallel)
+
+# Set up parallel processing
+cl <- makeCluster(detectCores() - 1)
+registerDoParallel(cl)
+
+set.seed(123)
+xgb_model <- train(
+  x = train_X, y = train_y,
+  method = "xgbTree",
+  tuneLength = 10,
+  trControl = trainControl(method = "cv", number = 10, allowParallel = TRUE)
+)
+
+xgb_predictions <- predict(xgb_model, test_X)
+xgb_rmse <- RMSE(xgb_predictions, test_y)
+xgb_r2 <- cor(xgb_predictions, test_y)^2
+
+# Skip AIC/BIC for XGBoost
+xgb_aic_bic <- c(AIC = NA, BIC = NA)
+
+# Stop parallel processing
+stopCluster(cl)
+registerDoSEQ()
+
+```
+
+
+#### Performance Matrix
+
+```{r}
+# Combine results into a data frame
+results_df <- data.frame(
+  Model = c("Bagged Trees", "Random Forest", "GBM", "XGBoost"),
+  Test_RMSE = c(bagged_rmse, rf_rmse, boost_rmse, xgb_rmse),
+  Test_R2 = c(bagged_r2, rf_r2, boost_r2, xgb_r2),
+  AIC = c(bagged_aic_bic["AIC"], rf_aic_bic["AIC"], boost_aic_bic["AIC"], xgb_aic_bic["AIC"]),
+  BIC = c(bagged_aic_bic["BIC"], rf_aic_bic["BIC"], boost_aic_bic["BIC"], xgb_aic_bic["BIC"])
+)
+
+# Sort by Test_RMSE
+results_df <- results_df[order(results_df$Test_RMSE), ]
+
+# Display results
+print(results_df)
+
+```
+
+---
+
+### Notes:
+1. **Performance Matrix:** Includes training and testing RMSE, \(R^2\), and placeholders for AIC and BIC where not applicable.
+2. **AIC/BIC:** Not computed for tree-based models because they don't directly provide coefficients and likelihood.
+3. **Dependencies:** Ensure that `caret`, `ipred`, `randomForest`, `gbm`, and `xgboost` are installed.
+
+Run each block sequentially to build, test, and evaluate the models. Let me know if you encounter any issues!
+
+
+
+
+
+
+
+
