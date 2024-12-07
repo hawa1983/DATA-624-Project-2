@@ -9,6 +9,12 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+## Objective
+
+The dataset StudentData is contains information from a fictional company called ABC Beverage. In this scenario leadership has mentioned that there are new regulations requiring us to understand the manufacturing process, and the predictive factors.
+
+In this analysis our team will create and compare predictive models of PH.
+
 ```{r}
 # Load training and test datasets with explicit missing value handling
 train_set <- read.csv("https://raw.githubusercontent.com/hawa1983/DATA-624/refs/heads/main/Project%202/StudentData.csv", na.strings = c("", "NA", "NULL"))
@@ -24,6 +30,10 @@ str(evaluation_set)
 ```
 
 ## Summarize numerical variables and investigate missing values
+
+At first glance, we noticed that there were many skewed variables and presence of outlier values. The variables also greatly vary in scale. Both issues can lead to bias, reducing the efficiency of our models. There are also some missing values. 
+
+More information on specific observations and actions taken will be described below.
 
 ### Notable Observations:
 
